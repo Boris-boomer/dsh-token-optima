@@ -117,13 +117,6 @@ interface EffortProbeResult {
 
 const effortProbeCache = new Map<string, EffortProbeResult | null>()
 
-/**
- * 安全地从 ctx / rootCtx 上取 llm 服务。
- *
- * 用 .get?.() 而不是 .llm 属性访问：Cordis 的服务可能是 getter，
- * 直接读属性会触发服务解析并在服务未就绪时抛错，把 apply() 顶层搞挂。
- * 这里全程包 try/catch，取不到就返回 undefined。
- */
 function safeGetLlm(rootCtx: unknown, ctx: unknown): unknown {
   const tryGet = (c: unknown): unknown => {
     if (!c || typeof c !== 'object') return undefined
@@ -145,7 +138,7 @@ function safeGetLlm(rootCtx: unknown, ctx: unknown): unknown {
  * 探测 adapter 支持的 effort level 列表。
  *
  * 防御性解析：
- * - info.reasoning 不存在 → 返回 null（adapter 不支持）
+ * - info.reasoning 不存在 → 返回 null（adapter 不支持，本环境 amd-radeon 即如此）
  * - efforts 里元素是字符串或 { id: string } 都接受
  * - 抛错也返回 null
  */
@@ -203,13 +196,12 @@ export function installEffortPolicy(
 ): void {
   const rootCtx = ((ctx as unknown as { root?: Context }).root ?? ctx) as Context
 
-  // 只在安装时读一次 llm，全程 try/catch，取不到就永远跳过探测。
   const llmService = safeGetLlm(rootCtx, ctx)
-  if (llmService) {
-    fold.noteEvent('EFFORT-POLICY: llm service available, probe enabled')
-  } else {
-    fold.noteEvent('EFFORT-POLICY: llm service not found, probe disabled')
-  }
+  fold.noteEvent(
+    llmService
+      ? 'EFFORT-POLICY: llm service available, probe enabled'
+      : 'EFFORT-POLICY: llm service not found, probe disabled',
+  )
 
   const makeHandler = () => {
     return async (

@@ -1,5 +1,5 @@
 import type { FC } from 'react'
-import { colors, groupColors } from './styles'
+import { colors, groupColors } from './styles.js'
 
 export interface TrendEntry {
   turnId: string

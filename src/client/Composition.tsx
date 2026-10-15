@@ -1,5 +1,5 @@
 import type { FC } from 'react'
-import { colors, groupColors, precisionOpacity } from './styles'
+import { colors, groupColors, precisionOpacity } from './styles.js'
 
 export interface CompositionEntry {
   id: number

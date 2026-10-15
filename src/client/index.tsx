@@ -1,8 +1,8 @@
 import { createRoot } from 'react-dom/client'
 import { useState, useEffect, type FC } from 'react'
-import { Panel } from './Panel'
-import { detectDark, readInheritedFont, type InheritedFont } from './styles'
-import { TYPERT_REMOTE } from './descriptors'
+import { Panel } from './Panel.js'
+import { detectDark, readInheritedFont, type InheritedFont } from './styles.js'
+import { TYPERT_REMOTE } from './descriptors.js'
 
 export const inject = ['remote']
 
@@ -41,10 +41,10 @@ const Root: FC<RootProps> = ({ ctx }) => {
 
   /* ---------- 主题 + 字体跟随 ---------- */
   useEffect(() => {
-    const update = () => {
+    const update = (): void => {
       setDark(detectDark())
       const f = readInheritedFont()
-      setFont((prev) =>
+      setFont((prev: InheritedFont) =>
         prev.fontFamily === f.fontFamily &&
         prev.fontSize === f.fontSize &&
         prev.lineHeight === f.lineHeight
@@ -80,8 +80,9 @@ const Root: FC<RootProps> = ({ ctx }) => {
     const scan = (url: string): void => {
       try {
         const m = url.match(/[?&]sessionId=(session-[0-9a-f-]+)/i)
-        if (m && m[1]) {
-          setSessionId((prev) => (prev === m[1] ? prev : m[1]))
+        const captured = m?.[1]
+        if (captured) {
+          setSessionId((prev) => (prev === captured ? prev : captured))
         }
       } catch {
         // ignore

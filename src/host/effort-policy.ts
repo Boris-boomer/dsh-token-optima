@@ -106,58 +106,31 @@ export function installEffortPolicy(
 ): void {
   const rootCtx = ((ctx as unknown as { root?: Context }).root ?? ctx) as Context
 
-  fold.noteEvent('EFFORT-POLICY: install called')
-
   const handler = async (
     payload: unknown,
     next: () => Promise<unknown>,
   ): Promise<unknown> => {
-    // 每次触发都记一行
-    let payloadKeys = ''
-    try {
-      if (payload && typeof payload === 'object') {
-        payloadKeys = Object.keys(payload as object).join(',')
-      }
-    } catch {
-      payloadKeys = '<unreadable>'
-    }
-    fold.noteEvent(`EFFORT-POLICY: agent/request FIRED keys=[${payloadKeys}]`)
-
     const seed = await next()
     try {
-      if (!seed || typeof seed !== 'object') {
-        fold.noteEvent('EFFORT-POLICY: seed not object')
-        return seed
-      }
+      if (!seed || typeof seed !== 'object') return seed
       const p = (payload ?? {}) as Record<string, unknown>
       const signal = p['signal'] as AbortSignal | undefined
-      if (signal?.aborted) {
-        fold.noteEvent('EFFORT-POLICY: signal aborted')
-        return seed
-      }
+      if (signal?.aborted) return seed
 
       const agent = p['agent'] as Record<string, unknown> | undefined
-      if (!agent) {
-        fold.noteEvent('EFFORT-POLICY: no agent in payload')
-        return seed
-      }
-      const session = agent['session']
+      const session = agent?.['session']
       const sessionId =
         session && typeof session === 'object'
           ? String((session as Record<string, unknown>)['id'] ?? '')
           : ''
-      if (!sessionId) {
-        fold.noteEvent('EFFORT-POLICY: no sessionId')
-        return seed
-      }
+      if (!sessionId) return seed
 
       const seedObj = seed as Record<string, unknown>
-      const seedEffort = seedObj['reasoningEffort']
-      fold.noteEvent(
-        `EFFORT-POLICY: session=${sessionId} seedEffort=${String(seedEffort)}`,
-      )
 
-      if (typeof seedEffort !== 'string') {
+      // 只有当 seed 已显式带有 reasoningEffort（string）时才调整。
+      // 未带 = adapter 自行管理该字段（如 hermes），注入会报
+      // UNSUPPORTED_REASONING_EFFORT。
+      if (typeof seedObj['reasoningEffort'] !== 'string') {
         if (!fold.hasReportedUnsupported(sessionId)) {
           fold.markReportedUnsupported(sessionId)
           fold.recordEffortDecision({
@@ -170,18 +143,17 @@ export function installEffortPolicy(
         return seed
       }
 
-      const decision = decideEffort(fold, config, sessionId, seedEffort, session)
+      const currentEffort = seedObj['reasoningEffort'] as string
+
+      const decision = decideEffort(fold, config, sessionId, currentEffort, session)
       fold.recordEffortDecision({
         sessionId,
-        previous: seedEffort,
+        previous: currentEffort,
         decided: decision.level,
         reason: decision.reason,
       })
-      fold.noteEvent(
-        `EFFORT-POLICY: ${seedEffort} -> ${decision.level} (${decision.reason})`,
-      )
 
-      if (decision.level !== seedEffort) {
+      if (decision.level !== currentEffort) {
         return { ...seedObj, reasoningEffort: decision.level }
       }
     } catch (err) {
@@ -190,8 +162,12 @@ export function installEffortPolicy(
     return seed
   }
 
+  // Cordis 的事件表是闭集的；agent/request 由 dsh-agent 在运行时通过 scope
+  // 派发，类型系统里没有声明，用 as never 绕过编译期检查。
   try {
-    rootCtx.on('agent/request', handler)
+    ;(rootCtx as unknown as {
+      on: (name: string, fn: unknown) => void
+    }).on('agent/request', handler)
     fold.noteEvent('EFFORT-POLICY: attached on root')
   } catch (err) {
     fold.noteEvent(`EFFORT-POLICY: root attach failed: ${(err as Error).message}`)

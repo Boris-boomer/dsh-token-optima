@@ -6,9 +6,9 @@ import {
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
 } from 'react'
-import { Composition, type CompositionEntry, type GroupEntry } from './Composition'
-import { Trend, type TrendEntry } from './Trend'
-import { panelStyle, colors, type InheritedFont } from './styles'
+import { Composition, type CompositionEntry, type GroupEntry } from './Composition.js'
+import { Trend, type TrendEntry } from './Trend.js'
+import { panelStyle, colors, type InheritedFont } from './styles.js'
 
 interface Props {
   ctx: any
@@ -70,6 +70,27 @@ function getService(ctx: any): any {
   }
 }
 
+const POS_KEY = 'dsh-token-optima-panel-pos'
+
+function loadPos(): { x: number; y: number } | null {
+  try {
+    const raw = localStorage.getItem(POS_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    return p && typeof p.x === 'number' && typeof p.y === 'number' ? p : null
+  } catch {
+    return null
+  }
+}
+
+function savePos(p: { x: number; y: number }): void {
+  try {
+    localStorage.setItem(POS_KEY, JSON.stringify(p))
+  } catch {
+    // ignore
+  }
+}
+
 export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose }) => {
   const [report, setReport] = useState<Report | null>(null)
   const [composition, setComposition] = useState<CompositionEntry[]>([])
@@ -77,11 +98,10 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
 
-  const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(() => loadPos())
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
 
-  /* 拖动 */
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
       const d = dragRef.current
@@ -96,6 +116,12 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
       setPos({ x, y })
     }
     const onUp = () => {
+      if (dragRef.current) {
+        setPos((prev) => {
+          if (prev) savePos(prev)
+          return prev
+        })
+      }
       dragRef.current = null
     }
     document.addEventListener('mousemove', onMove)
@@ -118,7 +144,6 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
     e.preventDefault()
   }
 
-  /* 数据拉取（sessionId 由 client 自动提供） */
   useEffect(() => {
     let cancelled = false
 
@@ -139,7 +164,6 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
       }
 
       try {
-        // 让 host 端补 fold 当前 session（幂等）
         try {
           await svc.ensureSession()
         } catch {
@@ -253,7 +277,6 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
 
   return (
     <div ref={panelRef} style={merged}>
-      {/* 标题栏（可拖动） */}
       <div
         onMouseDown={startDrag}
         style={{

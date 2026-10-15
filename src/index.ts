@@ -18,6 +18,14 @@ export * from './core/index.js'
 export { SessionFold } from './host/session-fold.js'
 export type { CacheRisk } from './host/session-fold.js'
 
+/** Cordis 类型系统里没有声明这些运行时事件，统一用这个 interface 绕过。 */
+interface LooseCtx {
+  on: (name: string, fn: (...args: unknown[]) => unknown) => void
+  emit: (name: string, ...args: unknown[]) => void
+  get?: (key: string) => unknown
+  root?: unknown
+}
+
 class TokenOptimaController extends TypertRemoteService {
   constructor(
     ctx: Context,
@@ -73,6 +81,14 @@ class TokenOptimaController extends TypertRemoteService {
   }
 
   @Remote
+  async ensureSession(): Promise<number> {
+    const before = this.fold.listSessions().length
+    this.replayFn()
+    const after = this.fold.listSessions().length
+    return after - before
+  }
+
+  @Remote
   async debugEventCount(): Promise<number> {
     return this.fold.getObservedEventCount()
   }
@@ -80,15 +96,6 @@ class TokenOptimaController extends TypertRemoteService {
   @Remote
   async debugLastEvents(): Promise<string[]> {
     return this.fold.getRecentEventTypes()
-  }
-
-  /** client 主动要求重放当前 session（幂等） */
-  @Remote
-  async ensureSession(): Promise<number> {
-    const before = this.fold.listSessions().length
-    this.replayFn()
-    const after = this.fold.listSessions().length
-    return after - before
   }
 }
 
@@ -116,22 +123,30 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   const replay = (): void => {
     try {
-      const sessionsSvc: any =
-        (rootCtx as any).get?.('sessions') ?? (ctx as any).get?.('sessions')
-      if (!sessionsSvc) {
+      const sessionsSvc: unknown =
+        (rootCtx as unknown as LooseCtx).get?.('sessions') ??
+        (ctx as unknown as LooseCtx).get?.('sessions')
+      if (!sessionsSvc || typeof sessionsSvc !== 'object') {
         fold.noteEvent('REPLAY: sessions service not found')
         return
       }
 
+      const svc = sessionsSvc as Record<string, unknown>
       const lists: unknown[][] = []
       for (const method of ['list', 'all', 'entries', 'values']) {
         try {
-          const fn = sessionsSvc[method]
+          const fn = svc[method]
           if (typeof fn === 'function') {
-            const r = fn.call(sessionsSvc)
+            const r = (fn as () => unknown).call(sessionsSvc)
             if (Array.isArray(r)) lists.push(r)
             else if (r instanceof Map) lists.push([...r.values()])
-            else if (r && typeof r[Symbol.iterator] === 'function') lists.push([...r])
+            else if (
+              r &&
+              typeof r === 'object' &&
+              Symbol.iterator in r
+            ) {
+              lists.push([...(r as Iterable<unknown>)])
+            }
           }
         } catch {
           // ignore
@@ -139,7 +154,7 @@ export function apply(ctx: Context, config: ConfigType): void {
       }
       for (const prop of ['sessions', 'map', 'items', 'store', 'registry']) {
         try {
-          const v = sessionsSvc[prop]
+          const v = svc[prop]
           if (v instanceof Map) lists.push([...v.values()])
           else if (Array.isArray(v)) lists.push(v)
         } catch {
@@ -173,15 +188,17 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   installEffortPolicy(ctx, config, fold)
 
+  const loose = ctx as unknown as LooseCtx
+
   const kick = (): void => {
     try {
-      ctx.emit('internal/service')
+      loose.emit('internal/service')
     } catch {
       // ignore
     }
     try {
-      const gw: any = (ctx as any).get?.('typertGateway')
-      if (gw) gw.srcClaims = undefined
+      const gw = loose.get?.('typertGateway') as Record<string, unknown> | undefined
+      if (gw) gw['srcClaims'] = undefined
     } catch {
       // ignore
     }
@@ -190,16 +207,13 @@ export function apply(ctx: Context, config: ConfigType): void {
   setTimeout(kick, 1000)
   setTimeout(kick, 5000)
 
-  // 首次立即 + 启动后快速重试
   setTimeout(replay, 500)
   setTimeout(replay, 2000)
   setTimeout(replay, 6000)
 
-  // 持续每 5 秒 replay 一次（幂等，覆盖懒加载）
   const replayTimer = setInterval(replay, 5000)
 
-  // 实时 session/event 订阅
-  ctx.on('session/event', (s: unknown) => {
+  loose.on('session/event', (s: unknown) => {
     try {
       fold.observe(s)
     } catch (err) {
@@ -208,7 +222,8 @@ export function apply(ctx: Context, config: ConfigType): void {
   })
 
   if (rootCtx !== ctx) {
-    rootCtx.on('session/event', (s: unknown) => {
+    const rootLoose = rootCtx as unknown as LooseCtx
+    rootLoose.on('session/event', (s: unknown) => {
       try {
         fold.observe(s)
       } catch (err) {
@@ -221,7 +236,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     registerTools(ctx, fold)
   }
 
-  ctx.on('dispose', () => {
+  loose.on('dispose', () => {
     clearInterval(replayTimer)
     fold.dispose()
   })

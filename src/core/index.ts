@@ -4,6 +4,5 @@ export * from './cache-model.js';
 export * from './categories.js';
 export * from './reasoning.js';
 export * from './attribution.js';
-export * from './compressor.js';
 export * from './effort.js';
 export * from './budget.js';

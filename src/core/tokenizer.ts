@@ -63,7 +63,11 @@ export class EstimatedTokenizer implements TokenizerAdapter {
       }
     }
     if (start < text.length) {
-      out.push({ start, end: text.length, tokens: Math.max(1, Math.round(acc)) });
+      // 尾块：acc 一定 < blockSize（否则循环里已经推过并重置了）。
+      // 这里必须用 floor 而不是 round，否则 acc ∈ [63.5, 64) 会被 round 到 64，
+      // 让尾块被误判为 complete，破坏「追加内容不破坏已有前缀块哈希」性质。
+      // 相关回归测试：tests/property.test.ts > 追加内容不破坏已有前缀块的哈希
+      out.push({ start, end: text.length, tokens: Math.max(1, Math.floor(acc)) });
     }
     return out;
   }

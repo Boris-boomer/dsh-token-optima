@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Config } from '../config.js'
 import { attributeTurn } from '../core/attribution.js'
@@ -8,12 +7,19 @@ import { CATEGORIES, CATEGORY_GROUPS } from '../core/categories.js'
 import { toCsv } from './store-csv.js'
 import type {
   AssignableSource,
-  DeepSeekUsage,
   SourceSegment,
   TurnAttribution,
 } from '../core/types.js'
 import type { CacheChunk } from '../core/cache-model.js'
 import { BudgetTracker } from '../core/budget.js'
+import type { HealthProbe, HealthReport } from './health-probe.js'
+import {
+  classifySource,
+  extractReasoningText,
+  extractText,
+  normalizeUsage,
+  signatureOf,
+} from './surface-parsers.js'
 
 interface SurfaceNode {
   seq: number
@@ -33,6 +39,7 @@ interface InternalState {
   lastReasoningHash: string | null
   surfaceSignature: string | null
   surfaceLength: number
+  toolCallCount: number
 }
 
 export interface CacheRisk {
@@ -70,7 +77,13 @@ export class SessionFold {
 
   private cacheRisks: CacheRisk[] = []
 
-  constructor(private readonly ctx: Context, private readonly config: Config) {
+  private currentSessionId = ''
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly config: Config,
+    private readonly health: HealthProbe,
+  ) {
     void ctx
     this.tokenizer = new EstimatedTokenizer()
     this.reasoning = new ReasoningTracker(config.hashSalt)
@@ -154,11 +167,41 @@ export class SessionFold {
     return this.effortDecisions.slice(-20)
   }
 
+  setCurrentSession(sessionId: string): void {
+    if (sessionId) this.currentSessionId = sessionId
+  }
+
+  getCurrentSession(): string {
+    return this.currentSessionId
+  }
+
+  /**
+   * 当前 session 里的 tool call 数量。
+   *
+   * 权威来源：`tool/call` 事件累计（已确认在 session/event 流里）。
+   * 兜底：当 tool/call 一个都没收到时，退回 surface 里 `source === 'tool_result'`
+   * 的节点数。
+   */
+  getToolCallCount(sessionId: string): number {
+    const state = this.byId.get(sessionId)
+    if (!state) return 0
+    if (state.toolCallCount > 0) return state.toolCallCount
+    let surfaceCount = 0
+    for (const n of state.surface) {
+      if (n.source === 'tool_result') surfaceCount++
+    }
+    return surfaceCount
+  }
+
   /* ---------------- observe ---------------- */
 
   observe(session: unknown): void {
     if (!session || typeof session !== 'object') return
     const s = session as Record<string, unknown>
+
+    if (typeof s['id'] === 'string' && typeof s['seq'] === 'number') {
+      this.health.checkSession(session)
+    }
 
     const seq = typeof s['seq'] === 'number' ? (s['seq'] as number) : 0
     const eventAt = s['eventAt']
@@ -230,6 +273,7 @@ export class SessionFold {
       lastReasoningHash: null,
       surfaceSignature: null,
       surfaceLength: 0,
+      toolCallCount: 0,
     }
     this.byWeak.set(session, s)
     this.byId.set(id, s)
@@ -254,6 +298,10 @@ export class SessionFold {
     switch (type) {
       case 'request/header':
         state.header = data['header'] ?? null
+        return
+
+      case 'tool/call':
+        state.toolCallCount++
         return
 
       case 'system/message':
@@ -300,14 +348,6 @@ export class SessionFold {
     }
   }
 
-  /**
-   * 每次 surface 变动后调用。
-   *
-   * - 纯尾部追加 → 不破坏缓存
-   * - 中间替换     → 破坏缓存
-   * - 缩短 ≥ 2 条 → 破坏缓存（多半是 compaction）
-   * - 缩短 1 条   → 忽略（llm/retry-started 的正常回退）
-   */
   private checkSurfaceChange(state: InternalState): void {
     const seqs = state.surface.map((n) => n.seq)
     const nextSig = signatureOf(seqs)
@@ -325,11 +365,9 @@ export class SessionFold {
     state.surfaceSignature = nextSig
     state.surfaceLength = nextLen
 
-    // 长度增加 → 纯追加（或替换后变长，但那种情况会紧接着 shrink/replace 事件）
     if (nextLen > prevLen) return
 
     if (nextLen < prevLen) {
-      // 缩短 1 条多半是 llm/retry-started 的正常回退，不报
       if (prevLen - nextLen >= 2) {
         this.recordCacheRisk({
           sessionId: state.sessionId,
@@ -488,6 +526,11 @@ export class SessionFold {
       at: number
     }>
     cacheRisks: CacheRisk[]
+    foldFailures: number
+    debug: boolean
+    health: HealthReport
+    currentSessionId: string
+    toolCallCount: number
   } {
     const state = this.byId.get(sessionId)
     const turns = state?.turns ?? []
@@ -500,6 +543,11 @@ export class SessionFold {
       tokenizer: { id: this.tokenizer.id, precision: this.tokenizer.precision },
       effort: this.getEffortDecisions(sessionId),
       cacheRisks: this.getCacheRisks(sessionId),
+      foldFailures: this.foldFailures,
+      debug: this.config.debug,
+      health: this.health.snapshot(),
+      currentSessionId: this.currentSessionId,
+      toolCallCount: this.getToolCallCount(sessionId),
     }
   }
 
@@ -596,95 +644,6 @@ export class SessionFold {
     this.effortDecisions.length = 0
     this.reportedUnsupported.clear()
     this.cacheRisks.length = 0
+    this.currentSessionId = ''
   }
-}
-
-/* ---------------- 辅助 ---------------- */
-
-function signatureOf(seqs: number[]): string {
-  return createHash('sha1').update(seqs.join(',')).digest('hex').slice(0, 16)
-}
-
-const SURFACE_MARKERS_AGENTS = /AGENTS\.md/i
-const SURFACE_MARKERS_SKILL = /(?:^|\n)\s*(?:#+\s*)?skills?[:\s]/i
-
-function classifySource(type: string, text: string): AssignableSource {
-  if (type === 'system/message') {
-    if (SURFACE_MARKERS_AGENTS.test(text)) return 'agents_md'
-    if (SURFACE_MARKERS_SKILL.test(text)) return 'skills'
-    return 'system'
-  }
-  if (type === 'user/message') return 'user_msg'
-  if (type === 'assistant/message') return 'assistant_msg'
-  if (type === 'tool/message' || type === 'tool/result') return 'tool_result'
-  return 'injected_ctx'
-}
-
-function extractText(event: Record<string, unknown>): string {
-  const data = (event['data'] ?? {}) as Record<string, unknown>
-  const msg = (data['message'] ?? data) as Record<string, unknown>
-  const content = msg['content']
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    const parts: string[] = []
-    for (const block of content) {
-      if (typeof block === 'string') {
-        parts.push(block)
-        continue
-      }
-      if (block && typeof block === 'object') {
-        const b = block as Record<string, unknown>
-        const t = b['text']
-        if (typeof t === 'string') parts.push(t)
-      }
-    }
-    return parts.join('')
-  }
-  return ''
-}
-
-function extractReasoningText(event: Record<string, unknown>): string {
-  const data = (event['data'] ?? {}) as Record<string, unknown>
-  const stream = data['stream']
-  if (!Array.isArray(stream)) return ''
-  const parts: string[] = []
-  for (const chunk of stream) {
-    if (!chunk || typeof chunk !== 'object') continue
-    const c = chunk as Record<string, unknown>
-    if (c['type'] === 'reasoning' && typeof c['text'] === 'string') {
-      parts.push(c['text'] as string)
-    }
-  }
-  return parts.join('')
-}
-
-function normalizeUsage(usage: Record<string, unknown> | undefined): DeepSeekUsage {
-  const input = numberOr(usage?.['inputTokens'], 0)
-  const cacheRead = numberOr(usage?.['cacheReadTokens'], 0)
-  const cacheWrite = numberOr(usage?.['cacheWriteTokens'], 0)
-  const output = numberOr(usage?.['outputTokens'], 0)
-
-  const prompt = input + cacheRead + cacheWrite
-  const miss = input + cacheWrite
-
-  const details = usage?.['completion_tokens_details'] as
-    | Record<string, unknown>
-    | undefined
-  const reasoning =
-    numberOr(details?.['reasoning_tokens'], 0) ||
-    numberOr(usage?.['reasoningTokens'], 0)
-
-  return {
-    prompt_tokens: prompt,
-    prompt_cache_hit_tokens: cacheRead,
-    prompt_cache_miss_tokens: miss,
-    completion_tokens: output,
-    completion_tokens_details: {
-      reasoning_tokens: reasoning,
-    },
-  }
-}
-
-function numberOr(v: unknown, fallback: number): number {
-  return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }

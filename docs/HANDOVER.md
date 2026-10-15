@@ -1,9 +1,9 @@
 DSH Token Optima — 交接文档
 ============================
 
-版本：0.3.0
+版本：0.3.1
 文档生成时间：2026-10-15
-当前 commit：3f2a459
+当前 commit：（本次改动未提交）
 
 ---
 
@@ -36,6 +36,10 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 - 缓存被破坏的风险事件
 - 预算使用
 
+**与官方 `dsh-token-meter` 的分工**：
+- 官方给数：总量 / surface / 节点数 → 回答「花了多少」
+- 本插件给构成：14 类来源归因 + 64 块缓存建模 + 推理生命周期 + 缓存风险 → 回答「花在哪、为什么、能不能压、压了会不会破缓存」
+
 ### 它能做什么（当前）
 
 ✅ 14 类 Token 归因（坐标模型投影）
@@ -45,15 +49,16 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 ✅ 预算跟踪（会话 / 日 / 月）
 ✅ 面板 UI（圆环 + 趋势 + 明细 + 缓存风险 + 推理强度）
 ✅ CSV 导出
-✅ 自动跟随 DSH 当前会话
+✅ 自动跟随 DSH 当前会话（通过 `agent/request` hook，非 fetch hook）
 ✅ 面板拖动 + 位置记忆
 ✅ reasoning_effort 动态调整（仅当模型 adapter 允许）
+✅ DSH 接口版本探针（4 项探测，失败时面板红字 + health.json）
+✅ 数据可信度指示器（估算偏差 / 未归因 / fold 失败）
 
 ### 它不能做什么
 
 ❌ 上下文压缩（官方 `dsh-compaction-basic` 已覆盖）
-❌ 思维链剪枝（`compressor.ts` 有代码，未接入）
-❌ 真实 DeepSeek tokenizer（用字符加权估算，精度 80-90%）
+❌ 真实 DeepSeek tokenizer（用字符加权估算，精度 51-79%）
 ❌ 费率计算（`pricing/` 目录已删）
 ❌ 遥测上报（OTel 未接入）
 ❌ 多用户/多设备同步
@@ -62,7 +67,8 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 ### 能跑吗
 
 能。已经稳定运行，面板正常，数据准确。
-但**依赖的 DSH 内部 API 没有任何契约**，DSH 升级后可能静默失效。
+**DSH 升级时能显式报错**（§7.1 探针），不再静默失效。
+但**依赖的 DSH 内部 API 没有任何契约**，DSH 升级后仍可能失效。
 
 ---
 
@@ -75,7 +81,7 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
     pnpm install
     pnpm typecheck     # 应 0 错误
     pnpm build         # 生成 lib/index.mjs 和 lib/client.js
-    pnpm test          # 24 个测试全绿
+    pnpm test          # 15 个测试全绿
 
 ### 挂到 DSH
 
@@ -112,6 +118,11 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 
 右下角图标网格里点 `◎`，面板打开。
 
+### 调试
+
+默认 `config.debug = false`，`window.__tokenOptimaDebug` 不挂。
+调试前在插件 config 里设 `debug: true`，重启 DSH，Console 里才有全局变量。
+
 ---
 
 §3 方案对照（重要）
@@ -140,9 +151,9 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 
 | 方案要求 | 实际做法 | 差距 |
 |---|---|---|
-| 精确 DeepSeek tokenizer（WASM） | 字符加权估算 | 精度 80-90%，方案要求"优先 WASM" |
+| 精确 DeepSeek tokenizer（WASM） | 字符加权估算 | 精度 51-79%，方案要求"优先 WASM" |
 | 归因偏差对齐阈值 3% | 实现了，但用字符估算偏差常超 3%，实际走 `unattributed` 兜底 | 方案要求"若超阈值优先信任 API 真值"，做了，但大部分轮次都在兜底 |
-| reasoning_effort 动态调整 | 代码完整，但只在 adapter 声明 `adapterDefaults.reasoningEffort !== true` 时生效 | 大部分第三方模型不生效 |
+| reasoning_effort 动态调整 | 代码完整，但只在 seed 里显式带 `reasoningEffort` 时生效 | 大部分第三方 adapter（hermes/ollama）不生效 |
 | 隐私：遥测 opt-in | 没做遥测 | 方案要求"默认关，可开"，实际是"根本没有" |
 | 数据 TTL | 没做 | 方案要求"可配置保留期限" |
 | SBOM | 没做 | 方案要求"发布使用" |
@@ -171,8 +182,8 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 
 **生产健壮性（方案第十三章）**
 
-- ❌ 优雅降级（tokenizer 加载失败时）
-- ❌ 看门狗（初始化超时自动禁用）
+- ⚠️ 优雅降级：tokenizer 三层降级链已实现（WASM → BPE → 字符估算），但 WASM 层未接入
+- ❌ 看门狗（初始化超时自动禁用）—— 部分由 §7.1 探针替代
 - ❌ 熔断（压缩算法连续 3 次异常切换监控模式）
 - ❌ 幂等性（重复安装/卸载不残留）
 - ❌ 原子配置写
@@ -181,14 +192,14 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 
 - ❌ OTel trace/log/metric 导出
 - ❌ 高基数治理
-- ❌ 预算告警触发降级（有 advise 但没触发）
-- ⚠️ 面板展示有，但 `foldFailures` 等内部指标未上界面
+- ❌ 预算告警触发降级（有 advise 但未触发，受 adapter 限制，见 §7.15）
+- ✅ `foldFailures` / 估算偏差 / 未归因 已上界面（v0.3.1）
 
 **上下文优化（方案第五章）**
 
 - ❌ 压缩三层语义
 - ❌ 压缩触发条件
-- ❌ DAG 裁剪三遍法（`compressor.ts` 有代码但未接入）
+- ❌ DAG 裁剪三遍法（`compressor.ts` 已删，明确不做）
 - ❌ 思维链剪枝（同上）
 - ❌ 禁止压缩白名单（同上）
 
@@ -214,7 +225,8 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 - ✅ docs/API.md
 - ✅ docs/PERFORMANCE.md（内容是空壳）
 - ✅ docs/MIGRATION.md（内容是空壳）
-- ✅ docs/PLAYBOOK.md（本次新增）
+- ✅ docs/PLAYBOOK.md
+- ✅ HANDOVER.md（本文件）
 - ⚠️ 这些文档**大部分内容与实现不符**，需要重写
 
 ---
@@ -300,6 +312,10 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
       }
     }
 
+**不要加 `@deepseek-ai/dsh-session` / `@deepseek-ai/dsh-agent`**：
+它们在 npm 上有，但依赖链里含不在 npm 的包（`dsh-type-meta`），
+会导致 `pnpm install` 报 `ERR_PNPM_FETCH_404`。详见 §7.9。
+
 ### 4.6 cordis.patch.yml 格式
 
     - insert:
@@ -345,7 +361,7 @@ client target：
       ctx.on('dispose', () => { ... })
     }
 
-**关键坑**：Cordis 按函数引用去重。如果同一个函数引用挂到两个 ctx，
+**关键坑 1**：Cordis 按函数引用去重。如果同一个函数引用挂到两个 ctx，
 第二次被忽略。所以：
 
     // 错误
@@ -355,6 +371,12 @@ client target：
     // 正确
     ctx.on('session/event', (s) => { ... })
     rootCtx.on('session/event', (s) => { ... })  // 不同函数
+
+**关键坑 2**：`agent/request` 的派发位置不确定。在 `ctx` 侧和 `root` 侧
+都要挂（不同函数引用），只有一边会真正触发。实测：
+- 挂 `ctx` 侧：日志显示 `attached on ctx`，但 entry 从来没打印过
+- 挂 `root` 侧：entry 正常触发
+- 但 **不能只挂 root**，可能某些 DSH 版本派发到 ctx
 
 ### 4.9 DSH 事件类型（通过运行时探测）
 
@@ -371,8 +393,13 @@ client target：
 **waterfall 事件**（返回值会被用作后续处理输入）：
 
 - `agent/request` — payload: `{ turn, step, signal, agent }`。
-  `next()` 返回请求 config seed，包含 `provider` / `model` /
-  `reasoningEffort`（可选） / `maxTokens`（可选）。返回新对象可改请求。
+  `next()` 返回请求 config seed。实测 seed 的 keys 是 `provider, model`
+  （**可能没有 `reasoningEffort`**，取决于 adapter）。返回新对象可改请求。
+  - `agent` 对象有：`loopCtx,id,options,session,inbox,phase,activityDone,
+    scope,ctx,dispatch,requestHeaderLogged,requestSurfaceGeneration,
+    runtimeContext,assistantStreamRevision,assistantAttemptCounter,
+    systemPrompt,frozenMessages`
+  - `agent.session.id` 是当前会话 id
 - `agent/pre-step` — payload: `{ messages, turn, step, signal, agent }`。
   返回 `{ kind: 'enter' | 'reject', messages }`。
 
@@ -383,6 +410,8 @@ client target：
 
 ### 4.10 session 对象结构
 
+**真 Session 对象**（标志：`id` 是字符串 **且** `seq` 是数字）：
+
 - `session.id` — 字符串，session id
 - `session.seq` — 数字，当前总事件数
 - `session.eventAt(n)` — 方法，返回第 n 个事件对象
@@ -390,8 +419,20 @@ client target：
 - `session.surface.replaceGeneration` — 数字，surface 被替换的次数
 - `session.surface.contentGeneration` — 数字
 - `session.firstLiveSeq` — 数字，内存中第一个 live 事件的 seq
+- `session.toolHistoryProjection` / `toolHistorySeq` — 工具历史投影（**不是方法**，是字段）
+- `session.log` / `surfaceManager` / `header` / `headerFold` / `contextFold` /
+  `derived` / `derivedNodes` / `derivedGeneration` 等
 
-**坑**：同一个 session id 可能对应多个对象（真 Session + 包装器）。
+**包装器对象**（`ctx.sessions.list()` 混入的）：
+
+- 缺完整 `id + seq` 组合
+- 没有 `eventAt` 方法
+- 没有 `surface.nodes`
+
+**判断真 Session 的方法**：
+
+    typeof s.id === 'string' && typeof s.seq === 'number'
+
 用 id 做 Map 键去重，不要用对象引用。
 
 ### 4.11 事件数据结构
@@ -544,6 +585,7 @@ client 侧：
   - `CompactionEngine` 抽象类，唯一扩展点 `summarize()`
   - 已实现自动触发（`agent/pre-step` + `agent/request-error`）
   - 用 LLM 摘要替换上下文，比手工压缩强
+  - 有 `ctx.toolResultPruner` 服务（`dsh-compaction-tool-result-pruner`）
 - `@deepseek-ai/dsh-session-title` — 会话标题
 - `@deepseek-ai/dsh-typert-protocol` — RPC 协议
 - `@deepseek-ai/dsh-scope` — 作用域
@@ -565,7 +607,7 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
     }
 
 **注意**：`sessions.list()` 返回的对象可能没有 `eventAt` 方法（是包装器），
-要过滤掉。真 Session 对象的标志是 `hasEventAt === true` 且有 `surface`。
+要过滤掉。真 Session 对象的标志是 `id` 是字符串 + `seq` 是数字。
 
 ### 4.17 Cordis 访问控制
 
@@ -601,6 +643,34 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
   （软链到源码目录）
 - 崩溃日志：`~/AppData/Roaming/@deepseek-ai/dsh-desktop/logs/`
 
+### 4.20 当前会话识别（v0.3.1 逆向）
+
+**不能用 fetch hook 抓会话切换**：
+- DSH 走 `dsh-app://` 协议发请求（Electron IPC），不走 JS `window.fetch`
+- 用 `window.fetch` hook 抓到的 `api/changes.summary?sessionId=...` 是
+  残留请求，不代表当前激活会话
+- 切会话（从列表点选）不一定触发带 sessionId 的请求
+
+**`ctx.sessions.manager.engagedSessions` 也不是信号**：
+- 是 `Set<sessionId>`，会累积但不反映"当前激活"
+- 实测切会话时不变
+
+**唯一可靠信号**：`agent/request` waterfall payload 里的 `agent.session.id`。
+每次发消息一定触发，里面的 session id 就是当前会话。
+
+我们的做法：`effort-policy.ts` 的 handler 里调 `fold.setCurrentSession(sessionId)`，
+`report()` 返回 `currentSessionId`，client 每 2 秒轮询优先用它。
+fetch hook 保留当兜底（初始挂载时可能有用）。
+
+### 4.21 依赖树不可复现
+
+- `pnpm install` 在干净环境下报
+  `ERR_PNPM_FETCH_404: @deepseek-ai/dsh-type-meta`
+- 原因：DSH 的 peer 依赖链里含不在 npm registry 的包
+- 触发条件：任何导致 lockfile 重新解析的操作（改 package.json、清 node_modules、换机器）
+- **当前绕过**：不动 package.json、不删 node_modules、不动 lockfile
+- 真正修法（未做）：`pnpm overrides` 把断链包指到本地 stub
+
 ---
 
 §5 代码结构
@@ -620,30 +690,32 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
     │   ├── reasoning.ts            推理 token 生命周期
     │   ├── budget.ts               预算与降级建议
     │   ├── effort.ts               任务复杂度分类器
-    │   ├── compressor.ts           DAG 三遍法（**死代码，未接入**）
     │   └── index.ts                re-export
     ├── host/
     │   ├── session-fold.ts         核心：事件重放 + 状态 + 查询
-    │   ├── effort-policy.ts        agent/request hook
+    │   ├── health-probe.ts         DSH 接口版本探针（v0.3.1 新增）
+    │   ├── effort-policy.ts        agent/request hook + 当前会话识别
     │   ├── tools.ts                两个只读工具注册
     │   ├── store-csv.ts            CSV 导出
     │   └── index.ts                re-export
     └── client/
-        ├── index.tsx               入口 + fetch hook 抓 session id
+        ├── index.tsx               入口 + fetch hook（兜底）+ 当前会话轮询
         ├── Panel.tsx               主面板组件
         ├── Composition.tsx         圆环图 + 14 类明细
         ├── Trend.tsx               堆叠条趋势
         ├── descriptors.ts          Remote descriptors
         └── styles.ts               主题 + 字体 + 面板样式
 
+**注**：`core/compressor.ts` 已在 v0.3.1 删除。
+
 ### 关键类：SessionFold
 
-`src/host/session-fold.ts` 是最核心的文件，约 600 行。
+`src/host/session-fold.ts` 是最核心的文件，约 640 行。
 
 职责：
 - 维护 session 状态：`byId: Map<sessionId, InternalState>`
 - `observe(session)` — 从上次 cursor 推进到 `session.seq`，
-  逐个 fold 事件
+  逐个 fold 事件。同时调 `health.checkSession(session)` 做接口健康检查
 - `foldEvent(state, event)` — 事件分发
 - `settleTurn` — 处理 `assistant/message`，触发归因
 - `checkSurfaceChange` — 检测 surface 变动，记录 cache risk
@@ -651,6 +723,18 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
   `exportCsv` / `audit`
 - effort 决策记录：`recordEffortDecision` / `getEffortDecisions`
 - cache 风险记录：`getCacheRisks`
+- 当前会话：`setCurrentSession` / `getCurrentSession`（v0.3.1 新增）
+
+### 关键类：HealthProbe
+
+`src/host/health-probe.ts`（v0.3.1 新增）。
+
+职责：
+- 探测 4 项 DSH 接口：`session.eventAt` / `session.surface.nodes` /
+  `sessions 服务` / `agent/request` 挂载
+- 失败时：`console.error` + 写 `~/.dsh/token-optima-health.json`
+- 跳过包装器 session 对象（用 `id` 是字符串 + `seq` 是数字 判断）
+- `snapshot()` 在 `report()` 里被调用，返回给面板显示
 
 ### 数据流
 
@@ -661,6 +745,7 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
     ┌─────────────────────────────┐
     │ ctx.on('session/event')     │
     │  → fold.observe(session)    │
+    │    → health.checkSession()  │
     │    → foldEvent(state, event)│
     │      → 累积 surface 节点     │
     │      → assistant/message 时: │
@@ -668,11 +753,18 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
     │           → 14 类归因       │
     └─────────────────────────────┘
       ↓
+    ┌─────────────────────────────┐
+    │ agent/request waterfall:    │
+    │  → fold.setCurrentSession() │
+    │  → effort 决策              │
+    └─────────────────────────────┘
+      ↓
     byId 里存 turns / cacheRisks / effortDecisions
       ↓
     ┌─────────────────────────────┐
-    │ client Panel 每 2 秒轮询:    │
-    │  svc.ensureSession()        │
+    │ client 每 2 秒轮询:          │
+    │  svc.report('')             │
+    │   → 拿 currentSessionId      │
     │  svc.report(sessionId)      │
     │  svc.composition(id)        │
     │  svc.groups(id)             │
@@ -701,13 +793,17 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
 
 ### client 端
 
-`src/client/index.tsx` 做三件事：
+`src/client/index.tsx` 做四件事：
 
-1. **hook fetch + XHR**：拦截所有 HTTP 请求，正则匹配 `sessionId=xxx`，
-   捕获到就 `setSessionId`。这样切会话时面板自动跟随
-2. **拉会话标题**：每 5 秒调 `ctx.remote.namespaces.get('session').service.list({})`，
-   从 `projections.values.title` 拿标题
-3. **渲染 Panel**
+1. **从 host 轮询当前会话**（v0.3.1 主路径）：每 2 秒
+   `svc.report('')` 拿 `currentSessionId`
+2. **hook fetch + XHR**（兜底）：拦截 HTTP 请求，正则匹配
+   `sessionId=xxx`，捕获到就 `setFetchSessionId`
+3. **拉会话标题**：每 5 秒调 `session.list({})`，从
+   `projections.values.title` 拿标题
+4. **渲染 Panel**
+
+`activeSessionId = hostSessionId || fetchSessionId`。
 
 Panel 每 2 秒轮询 `svc.report(sessionId)`，拿数据重渲染。
 
@@ -723,7 +819,9 @@ Panel 每 2 秒轮询 `svc.report(sessionId)`，拿数据重渲染。
 3. 组装 system prompt / tools / messages，产生 `system/message`、
    `request/header`、`user/message` 等事件
 4. 发起 LLM 请求前，dispatch waterfall `agent/request`
-   - 我们的 handler 读 seed，判断 current effort，可能修改
+   - 我们的 handler 读 seed，判断 current effort
+   - `seed.reasoningEffort` 存在时可能修改
+   - `fold.setCurrentSession(sessionId)` 记录当前会话
 5. LLM 返回，产生 `assistant/message`（带 `usage` 和 `stream`）
 6. 如果有 tool call，继续 `tool/result`
 7. 下一 step 或结束
@@ -753,40 +851,66 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 §7 已知问题
 -----------
 
-### 高优先级
+### 已修（v0.3.1）
 
-**7.1 无 DSH 版本探针**
+**7.1 无 DSH 版本探针** —— ✅ 已修
 
-- 位置：`src/host/session-fold.ts`、`src/host/effort-policy.ts`
-- 现象：DSH 升级后，`session.eventAt` 或 `agent/request` payload
-  变了，插件静默失效（面板显示"等待首次对话"）
-- 修法：启动时检查关键接口存在性，缺一个就在面板打红字警告
-- 具体检查：
-  - `typeof session.eventAt === 'function'`
-  - `Array.isArray(session.surface?.nodes)`
-  - `rootCtx.get('sessions')` 存在
-  - `agent/request` waterfall 能挂上
+- 新增 `src/host/health-probe.ts`
+- 探测 4 项：`session.eventAt` / `session.surface.nodes` /
+  `sessions 服务` / `agent/request` 挂载
+- 失败时 `console.error` + 写 `~/.dsh/token-optima-health.json`
+- 面板顶部红字显示
+- 包装器 session 对象通过 `id 是字符串 + seq 是数字` 过滤，避免误报
 
-**7.2 `foldFailures` 不上界面**
+**7.2 `foldFailures` 不上界面** —— ✅ 已修
 
-- 位置：`session-fold.ts` 里累计，面板从不显示
-- 现象：内部 fold 大量失败，用户看到"等待首次对话"，不知道哪里坏
-- 修法：Panel 加一个区块显示 `foldFailures`，非 0 时红字警告
+- 面板顶部「数据可信度」区块显示 `foldFailures` / 估算偏差 / 未归因
+- 三项全正常时不显示区块
 
-**7.3 `window.__tokenOptimaDebug` 泄露 ctx**
+**7.3 `window.__tokenOptimaDebug` 泄露 ctx** —— ✅ 已修
 
-- 位置：`src/client/index.tsx`
-- 现象：任何页面脚本都能拿到 `ctx.remote` / `ctx.session`
-- 修法：删掉这个全局变量，或者只在 `config.debug` 为 true 时挂
+- 改成 `config.debug` 门控，默认 `false`
+- `debug: false` 时不挂全局变量，`debug: true` 时才挂
+- 调试指南需注明"需先开启 debug"
 
-### 中优先级
+**7.6 compressor.ts 死代码** —— ✅ 已删
+
+- `src/core/compressor.ts` 删除
+- `src/core/index.ts` 的 re-export 删除
+- `tests/compressor.test.ts` 删除
+
+### 已修（历史）
+
+**7.16 EstimatedTokenizer 尾块 tokens 误判** —— ✅ 已修
+
+- 位置：`src/core/tokenizer.ts` 的 `chunkBoundaries` 尾块分支
+- 症状：尾块 `tokens` 用 `Math.round(acc)`，当 raw acc ∈ [63.5, 64) 时
+  round 到 64，`complete` 被误判为 true，破坏「追加内容不破坏已有
+  前缀块哈希」性质
+- 触发：flaky，fast-check 随机 seed 撞上才暴露，一直存在
+- 修法：尾块改 `Math.floor(acc)`
+- 修复时间：2026-10-15
+
+**7.14 面板会话跟随** —— ✅ 已修
+
+- 症状：面板显示的会话和用户当前激活的会话不一致
+- 根因：`window.fetch` hook 抓不到会话切换。DSH 走 `dsh-app://` 协议
+  （Electron IPC），不走 JS fetch；切会话不一定触发带 sessionId 的请求
+- 修法：`effort-policy.ts` 的 `agent/request` handler 里调
+  `fold.setCurrentSession(sessionId)`，`report()` 返回 `currentSessionId`，
+  client 每 2 秒轮询优先用它，fetch hook 兜底
+- 修复时间：2026-10-15
+
+### 高优先级（未修）
 
 **7.4 fetch 全局劫持**
 
 - 位置：`src/client/index.tsx`
 - 现象：`window.fetch = fetchHandler` 覆盖整个应用的 fetch
 - 风险：如果其他插件也 hook fetch，互相覆盖
-- 修法：改成只观察（用 Proxy 或只在 URL 匹配时记录），不改写
+- 现状：v0.3.1 里 fetch hook 只当兜底，主路径走 host 的 currentSessionId，
+  风险降低
+- 修法：彻底删掉 fetch hook
 
 **7.5 codec 假 passthrough**
 
@@ -794,12 +918,6 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 - 现象：所有 codec 的 `create` 返回 `parse: v => v`，无验证
 - 风险：恶意 client 可以传任意数据
 - 修法：如果安全重要，手写简易 zod 替换；如果自己用，可接受
-
-**7.6 compressor.ts 死代码**
-
-- 位置：`src/core/compressor.ts`
-- 现象：约 130 行，从没接入任何路径
-- 修法：删掉，或者标注"保留备用"
 
 **7.7 effort.ts 的 toolCalls 一直为 0**
 
@@ -809,35 +927,65 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 
 **7.8 session-fold.ts 过大**
 
-- 位置：约 600 行，承担了重放、状态、查询、cache 风险四职责
+- 位置：约 640 行，承担了重放、状态、查询、cache 风险四职责
 - 修法：拆成 `replay.ts` / `state.ts` / `queries.ts` / `risks.ts`
 
-**7.9 隐式依赖未声明**
+### 中优先级
 
-- 位置：`package.json` 的 `peerDependencies`
+**7.9 隐式依赖未声明** —— 结论：不修
+
 - 现状：代码里实际用了 `dsh-session`、`dsh-agent` 的接口，
-  但 package.json 只声明了 `cordis` / `typert-protocol` / `schemastery`
-- 修法：补上 `@deepseek-ai/dsh-session` 和 `@deepseek-ai/dsh-agent`
+  package.json 未声明
+- 核实（2026-10-15）：这两个包在 npm 上有（`dsh-session@0.0.1-rc.1` /
+  `dsh-agent@0.1.0-rc.6`），但它们依赖链里有 `@deepseek-ai/dsh-type-meta`，
+  后者**不在 npm 上**。写进 peerDependencies 会导致 `pnpm install`
+  报 `ERR_PNPM_FETCH_404`
+- **结论：不修**。DSH 内部包不进 package.json，对它们的引用由 DSH 运行时
+  提供，仅靠文档记录
+- 影响：`pnpm install` 的依赖检查看不到这两个包。如果未来 DSH 改变它们
+  的接口，只能靠运行时版本探针（§7.1）发现
 
 **7.10 版本差异**
 
 - 本地装的 `@deepseek-ai/dsh-typert-protocol@0.1.0-rc.6`
 - DSH 运行时是 `0.2.0-rc.2`
 - 装饰器 API 可能不完全兼容
-- 修法：`pnpm add -D @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2`
+- 修法：`pnpm add -D @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2`，
+  升级后**必须跑一遍面板**（不能只看 build 过）
+
+**7.15 预算降级无法验证（adapter 限制）**
+
+- 现象：config 设 `budgetSession: 10` 后降级不生效
+- 原因：`agent/request` waterfall 的 seed 里没有 `reasoningEffort`
+  字段（当前 adapter hermes/ollama 不暴露），代码走 unsupported 分支
+- 结论：代码正确，受 adapter 限制。未来接 DeepSeek 官方 API 时才能验证
+- 验证时间：2026-10-15
+
+**7.17 依赖树不可复现**
+
+- 见 §4.21
+- 现状：`pnpm install` 在干净环境下失败
+- 绕过：不动 package.json、不删 node_modules、不动 lockfile
+- 修法（未做）：`pnpm overrides` 把断链包指到本地 stub
 
 ### 低优先级
 
 **7.11 老 session 的 effort 不显示**
+
 - 已识别，接受
-- 原因：`agent/request` 只对新请求触发
+- 原因：`agent/request` 只对新请求触发；effort 决策是内存状态，
+  DSH 重启清空
 
 **7.12 字符 tokenizer 精度**
-- 估算 vs 真实偏差常 > 50%
+
+- 实测偏差 51%–79%（受会话内容影响）
 - 大部分 session 走 `unattributed` 兜底
-- 修法：接入真实 DeepSeek WASM tokenizer（P0，但没做）
+- **已评估不做 WASM**：只影响分摊比例和兜底，不影响趋势判断，
+  成本 1-2 天 + 长期维护
+- 若未来要做精确成本归因或跨模型对比，再考虑
 
 **7.13 面板无 CSV 导出按钮时的错误处理**
+
 - 修法：已经加了，当前有 `CSV` 按钮
 
 ---
@@ -849,29 +997,31 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 
 ### 立刻（30 分钟内）
 
-1. 删 `window.__tokenOptimaDebug`（或加开关控制）
-2. 删 `compressor.ts` 死代码
-3. 把 `foldFailures` 显示在面板
+1. ~~删 `window.__tokenOptimaDebug`~~ ✅ 已做（debug 门控）
+2. ~~删 `compressor.ts` 死代码~~ ✅ 已做
+3. ~~把 `foldFailures` 显示在面板~~ ✅ 已做
 
 ### 短期（几小时）
 
-4. 加 DSH 版本探针（§7.1）
-5. 写 `docs/DSH-INTERNALS.md`（把本文档 §4 抽出来，
-   单独维护更新）
-6. `package.json` 补 peerDependencies
-7. 更新 typert-protocol 到 0.2.0-rc.2
+4. ~~加 DSH 版本探针（§7.1）~~ ✅ 已做
+5. ~~写 `docs/DSH-INTERNALS.md`~~ —— 建议把本文档 §4 抽出来独立维护
+6. ~~`package.json` 补 peerDependencies~~ —— 结论：不修（§7.9）
+7. 更新 typert-protocol 到 0.2.0-rc.2（§7.10）
+8. 修 `effort.toolCalls` 恒为 0（§7.7）
+9. 把 §4 抽成 `docs/DSH-INTERNALS.md`，每条加版本标注
 
 ### 中期（几天）
 
-8. 真实 DeepSeek WASM tokenizer 接入（方案 P0）
-9. host 端单元测试（尤其 `session-fold.ts`）
-10. 拆分 `session-fold.ts`
+10. host 端单元测试（尤其 `session-fold.ts`）—— 先拆再测
+11. 拆分 `session-fold.ts`（§7.8）
+12. 真删 fetch hook（§7.4）
 
 ### 长期（如果打算认真维护）
 
-11. Worker 隔离 + 背压队列（方案性能预算）
-12. OTel 遥测导出
-13. 文档重写，让每份与实际一致
+13. Worker 隔离 + 背压队列（方案性能预算）
+14. OTel 遥测导出
+15. 文档重写，让每份与实际一致
+16. `pnpm overrides` 修依赖树（§7.17）
 
 ### 如果要做压缩
 
@@ -887,6 +1037,9 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 
 §9 调试指南
 -----------
+
+**前置**：默认 `config.debug = false`，`window.__tokenOptimaDebug` 不挂。
+调试前在 profile 的插件 config 里设 `debug: true`，重启 DSH。
 
 ### 面板显示"等待首次对话"
 
@@ -908,6 +1061,22 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 
 3. 如果有 session 但 turns=0 → fold 中途失败。看 `foldFailures`。
 
+### 面板显示"选择上方会话以查看数据"
+
+含义：`activeSessionId` 空（`currentSessionId` 和 `fetchSessionId` 都空）。
+
+排查：
+
+1. **发一条消息**（`agent/request` 只在发消息时触发）
+2. 再跑：
+
+       const r = await __tokenOptimaDebug.service.report('')
+       const v = r?.value ?? r
+       console.log('currentSessionId:', v?.currentSessionId)
+
+3. 如果还是空 → `agent/request` handler 没触发。
+   看内部日志里有没有 `EFFORT-POLICY[root]: entry`
+
 ### 面板显示"等待 host 端 remote 通道就绪"
 
 含义：`ctx.remote.namespaces.get('tokenOptima')` 是 undefined。
@@ -923,6 +1092,17 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 
 3. 如果有值但 `service` 是 undefined → host 端没注册成功。
    看启动时有没有 `[dsh-token-optima] loaded (N remote methods)`。
+
+### 面板顶部红字"DSH 接口变更：xxx"
+
+含义：`HealthProbe` 探测到某接口缺失。
+
+排查：
+
+1. 看 `~/.dsh/token-optima-health.json` 里 `failures` 数组
+2. 检查 DSH 是否升级了
+3. 手动验证：F12 跑 `__tokenOptimaDebug.service.report('')`，
+   看返回的 `health` 字段
 
 ### DSH 启动崩溃
 
@@ -951,7 +1131,8 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 - `debugLastEvents()` — 返回最近 500 条内部日志行
 - `listSessions()` — 当前跟踪的 session 列表
 - `debugEventCount()` — 内部事件计数
-- `report(sessionId)` — 特定 session 的完整报告
+- `report(sessionId)` — 特定 session 的完整报告。
+  `report('')` 返回 `currentSessionId` 和 `health`
 - `ensureSession()` — 强制重放一次
 - `getCacheRisks(sessionId)` — 缓存风险列表
 - `getEffortDecisions(sessionId)` — effort 决策历史
@@ -987,19 +1168,31 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
   — agent loop，理解 agent/request waterfall
 - `<目录>\dsh\node_modules\@deepseek-ai\dsh-compaction-basic\lib\index.js`
   — 官方压缩实现
+- `<目录>\dsh\node_modules\@deepseek-ai\dsh-token-meter\lib\index.js`
+  — 官方 token 计量，看它的 tokenizer 实现
 
 ---
 
 §11 版本记录
 ------------
 
-- v0.3.0（当前）
+- v0.3.1（当前）
+  - DSH 接口版本探针（health-probe.ts）
+  - 数据可信度指示器（foldFailures / 估算偏差 / 未归因上界面）
+  - debug 门控（默认 false，不再泄露 ctx）
+  - 面板会话跟随修复（走 agent/request，不靠 fetch hook）
+  - EstimatedTokenizer 尾块 round bug 修复
+  - compressor.ts 死代码删除
+  - 测试数量从 24 → 15（删了 compressor 测试）
+  - 本次更新交接文档
+
+- v0.3.0
   - 面板自动跟随会话
   - 缓存风险检测
   - CSV 导出
   - 面板位置记忆
   - 清理死代码
-  - 本次新增交接文档
+  - 新增交接文档
 
 - v0.2.0
   - 接入 DSH session/event
@@ -1017,8 +1210,13 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 ----------
 
 这个项目能跑，算法是对的，功能是真的。
-但它建立在**没有任何契约的逆向接口**上，DSH 每次升级都可能静默失效。
 
-如果只给自己用，接受"每次升级花 1-2 小时 debug"。
-如果要做成长期可用的工具，必须补上 §7.1（版本探针）和
-§7.2（失败上界面）——这是唯一能让它在 DSH 升级时**显式报错**的机制。
+v0.3.1 之后，它从「随时可能静默死」变成「坏了会告诉你哪坏了」——
+DSH 接口探针、数据可信度指示器、debug 门控三项补齐，让它在 DSH 升级时
+能**显式报错**，而不是面板空白让你猜。
+
+剩下的短板集中在两处：
+1. **tokenizer 精度**（51-79%）—— 已评估不做 WASM，接受兜底
+2. **测试覆盖**（host/client 0 覆盖）—— 中期活，先拆再测
+
+依赖的 DSH 内部 API 仍无任何契约，DSH 每次升级都要重跑一次探针确认。

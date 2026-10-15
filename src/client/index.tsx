@@ -34,10 +34,13 @@ interface RootProps {
 
 const Root: FC<RootProps> = ({ ctx }) => {
   const [open, setOpen] = useState(false)
-  const [sessionId, setSessionId] = useState('')
+  const [hostSessionId, setHostSessionId] = useState('')
+  const [fetchSessionId, setFetchSessionId] = useState('')
   const [titles, setTitles] = useState<Record<string, string>>({})
   const [dark, setDark] = useState<boolean>(() => detectDark())
   const [font, setFont] = useState<InheritedFont>(() => readInheritedFont())
+
+  const activeSessionId = hostSessionId || fetchSessionId
 
   /* ---------- 主题 + 字体跟随 ---------- */
   useEffect(() => {
@@ -72,7 +75,33 @@ const Root: FC<RootProps> = ({ ctx }) => {
     }
   }, [])
 
-  /* ---------- hook fetch：抓当前 sessionId ---------- */
+  /* ---------- 从 host 轮询当前会话 ---------- */
+  useEffect(() => {
+    let cancelled = false
+    const refresh = async (): Promise<void> => {
+      const svc = getService(ctx)
+      if (!svc) return
+      try {
+        const r = await svc.report('')
+        const v = (r?.value ?? r) as { currentSessionId?: string } | null
+        if (cancelled) return
+        const id = v?.currentSessionId ?? ''
+        if (id) setHostSessionId((prev) => (prev === id ? prev : id))
+      } catch {
+        // ignore
+      }
+    }
+    void refresh()
+    const t = setInterval(() => {
+      void refresh()
+    }, 2000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [ctx])
+
+  /* ---------- fetch hook：兜底抓 sessionId ---------- */
   useEffect(() => {
     const origFetch = window.fetch
     const origOpen = XMLHttpRequest.prototype.open
@@ -82,7 +111,7 @@ const Root: FC<RootProps> = ({ ctx }) => {
         const m = url.match(/[?&]sessionId=(session-[0-9a-f-]+)/i)
         const captured = m?.[1]
         if (captured) {
-          setSessionId((prev) => (prev === captured ? prev : captured))
+          setFetchSessionId((prev) => (prev === captured ? prev : captured))
         }
       } catch {
         // ignore
@@ -180,37 +209,52 @@ const Root: FC<RootProps> = ({ ctx }) => {
     return () => window.removeEventListener('token-optima:toggle', handler)
   }, [])
 
-  /* ---------- 调试全局 ---------- */
+  /* ---------- 从 host 拿 debug 开关 ---------- */
   useEffect(() => {
-    ;(window as any).__tokenOptimaDebug = {
-      ctx,
-      remote: ctx?.remote,
-      namespaces: ctx?.remote?.namespaces,
-      get service() {
-        return getService(ctx)
-      },
-      get sessionSvc() {
-        return getSessionSvc(ctx)
-      },
-      get currentSessionId() {
-        return sessionId
-      },
-      get titles() {
-        return titles
-      },
-    }
+    const svc = getService(ctx)
+    if (!svc) return
+    let cancelled = false
+    Promise.resolve(svc.report(''))
+      .then((r: any) => {
+        const v = r?.value ?? r
+        if (!cancelled && v?.debug === true) {
+          ;(window as any).__tokenOptimaDebug = {
+            ctx,
+            remote: ctx?.remote,
+            namespaces: ctx?.remote?.namespaces,
+            get service() {
+              return getService(ctx)
+            },
+            get sessionSvc() {
+              return getSessionSvc(ctx)
+            },
+            get currentSessionId() {
+              return activeSessionId
+            },
+            get titles() {
+              return titles
+            },
+          }
+        } else {
+          delete (window as any).__tokenOptimaDebug
+        }
+      })
+      .catch(() => {
+        delete (window as any).__tokenOptimaDebug
+      })
     return () => {
+      cancelled = true
       delete (window as any).__tokenOptimaDebug
     }
-  }, [ctx, sessionId, titles])
+  }, [ctx, activeSessionId, titles])
 
   if (!open) return null
 
   return (
     <Panel
       ctx={ctx}
-      sessionId={sessionId}
-      title={titles[sessionId] ?? ''}
+      sessionId={activeSessionId}
+      title={titles[activeSessionId] ?? ''}
       dark={dark}
       font={font}
       onClose={() => setOpen(false)}

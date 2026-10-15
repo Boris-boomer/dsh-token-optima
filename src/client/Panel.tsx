@@ -36,6 +36,12 @@ interface CacheRisk {
   detail: string
 }
 
+interface HealthReport {
+  at: number
+  ok: boolean
+  failures: Array<{ item: string; detail: string }>
+}
+
 interface Report {
   turns: number
   latest: {
@@ -46,6 +52,7 @@ interface Report {
     cacheEvents: Array<{ kind: string; atChunkIndex: number }>
     reasoning: { producedThisTurn: number; replayedInInput: number }
     categories: Record<number, { value: number; precision: string }>
+    unattributed?: { value: number; precision: string }
   } | null
   history: Array<{
     turnId: string
@@ -60,6 +67,9 @@ interface Report {
   tokenizer: { id: string; precision: string }
   effort: EffortDecision[]
   cacheRisks: CacheRisk[]
+  foldFailures: number
+  debug: boolean
+  health: HealthReport
 }
 
 function getService(ctx: any): any {
@@ -326,6 +336,42 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
 
   const shortId = sessionId ? sessionId.slice(-8) : '—'
 
+  /* ---------- 数据可信度 + 接口健康 ---------- */
+  const drift = report?.latest?.alignmentDrift ?? 0
+  const unattributed = report?.latest?.unattributed?.value ?? 0
+  const foldFailures = report?.foldFailures ?? 0
+  const health = report?.health
+
+  const issues: Array<{ level: 'warn' | 'error'; text: string }> = []
+
+  if (health && !health.ok) {
+    for (const f of health.failures) {
+      issues.push({
+        level: 'error',
+        text: `DSH 接口变更：${f.item}（${f.detail}）`,
+      })
+    }
+  }
+
+  if (drift > 0.03) {
+    issues.push({
+      level: 'warn',
+      text: `估算偏差 ${(drift * 100).toFixed(1)}% — 1-9 类为客户端估算，非精确值`,
+    })
+  }
+  if (unattributed > 0) {
+    issues.push({
+      level: 'warn',
+      text: `未归因 ${Math.round(unattributed)} tokens — 无法映射到任何来源`,
+    })
+  }
+  if (foldFailures > 0) {
+    issues.push({
+      level: 'error',
+      text: `${foldFailures} 个事件解析失败，数据可能不完整`,
+    })
+  }
+
   return (
     <div ref={panelRef} style={merged}>
       <div
@@ -411,9 +457,34 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
         </div>
       )}
 
-      {ready && !error && !report?.latest && (
+      {ready && !error && !report?.latest && issues.length === 0 && (
         <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>
           等待首次对话...
+        </div>
+      )}
+
+      {ready && !error && issues.length > 0 && (
+        <div
+          style={{
+            marginTop: '0.9em',
+            padding: '0.6em 0.7em',
+            borderRadius: 6,
+            background: dark ? 'rgba(245,166,35,0.08)' : 'rgba(245,166,35,0.10)',
+            border: `1px solid ${dark ? 'rgba(245,166,35,0.35)' : 'rgba(245,166,35,0.45)'}`,
+          }}
+        >
+          {issues.map((it, i) => (
+            <div
+              key={i}
+              style={{
+                fontSize: '0.88em',
+                lineHeight: 1.55,
+                color: it.level === 'error' ? '#E94B3C' : '#C77A00',
+              }}
+            >
+              ⚠ {it.text}
+            </div>
+          ))}
         </div>
       )}
 
@@ -427,8 +498,13 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             <div style={sectionTitleStyle}>推理强度</div>
             {latestEffort ? (
               latestEffort.decided === 'unsupported' ? (
-                <div style={{ color: colors.muted, fontSize: '0.92em' }}>
-                  当前模型未启用 reasoningEffort 控制
+                <div
+                  style={{
+                    color: colors.muted,
+                    fontSize: '0.92em',
+                  }}
+                >
+                  {latestEffort.reason}
                 </div>
               ) : (
                 <div style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.92em' }}>
@@ -511,7 +587,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
                 >
                   <div>
                     <span style={{ color: '#E94B3C', marginRight: '0.4em' }}>
-                      {r.kind === 'compaction' ? '⚡' : r.kind === 'shrink' ? '↓' : '↻'}
+                      {r.kind === 'compaction' ? '⚡' : r.kind === 'shrink' ? '↓' : '↔'}
                     </span>
                     <span style={{ fontWeight: 600 }}>{r.kind}</span>
                     <span

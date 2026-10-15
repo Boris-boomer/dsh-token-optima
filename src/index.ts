@@ -6,6 +6,7 @@ import {
 } from '@deepseek-ai/dsh-typert-protocol'
 import { Config, type Config as ConfigType } from './config.js'
 import { SessionFold } from './host/session-fold.js'
+import { HealthProbe } from './host/health-probe.js'
 import { registerTools } from './host/tools.js'
 import { installEffortPolicy } from './host/effort-policy.js'
 
@@ -17,8 +18,9 @@ export type { Config as TokenOptimaConfig } from './config.js'
 export * from './core/index.js'
 export { SessionFold } from './host/session-fold.js'
 export type { CacheRisk } from './host/session-fold.js'
+export { HealthProbe } from './host/health-probe.js'
+export type { HealthReport, HealthFailure } from './host/health-probe.js'
 
-/** Cordis 类型系统里没有声明这些运行时事件，统一用这个 interface 绕过。 */
 interface LooseCtx {
   on: (name: string, fn: (...args: unknown[]) => unknown) => void
   emit: (name: string, ...args: unknown[]) => void
@@ -97,6 +99,16 @@ class TokenOptimaController extends TypertRemoteService {
   async debugLastEvents(): Promise<string[]> {
     return this.fold.getRecentEventTypes()
   }
+
+  @Remote
+  async debugSeenEventTypes(): Promise<string[]> {
+    return this.fold.getSeenEventTypes()
+  }
+
+  @Remote
+  async debugToolCallCount(sessionId: string): Promise<number> {
+    return this.fold.getToolCallCount(sessionId)
+  }
 }
 
 function safeGet(obj: unknown, key: string): unknown {
@@ -109,7 +121,8 @@ function safeGet(obj: unknown, key: string): unknown {
 }
 
 export function apply(ctx: Context, config: ConfigType): void {
-  const fold = new SessionFold(ctx, config)
+  const health = new HealthProbe()
+  const fold = new SessionFold(ctx, config, health)
 
   fold.noteEvent('APPLY: entered')
 
@@ -121,11 +134,23 @@ export function apply(ctx: Context, config: ConfigType): void {
   const rootCtx = (safeGet(ctx, 'root') as Context | undefined) ?? ctx
   fold.noteEvent(`APPLY: rootCtx same as ctx = ${rootCtx === ctx}`)
 
+  const checkSessionsSvc = (): void => {
+    try {
+      const svc =
+        (rootCtx as unknown as LooseCtx).get?.('sessions') ??
+        (ctx as unknown as LooseCtx).get?.('sessions')
+      health.checkSessionsService(svc)
+    } catch (err) {
+      health.fail('sessions 服务', `探测抛错：${(err as Error).message}`)
+    }
+  }
+
   const replay = (): void => {
     try {
       const sessionsSvc: unknown =
         (rootCtx as unknown as LooseCtx).get?.('sessions') ??
         (ctx as unknown as LooseCtx).get?.('sessions')
+      health.checkSessionsService(sessionsSvc)
       if (!sessionsSvc || typeof sessionsSvc !== 'object') {
         fold.noteEvent('REPLAY: sessions service not found')
         return
@@ -140,11 +165,7 @@ export function apply(ctx: Context, config: ConfigType): void {
             const r = (fn as () => unknown).call(sessionsSvc)
             if (Array.isArray(r)) lists.push(r)
             else if (r instanceof Map) lists.push([...r.values()])
-            else if (
-              r &&
-              typeof r === 'object' &&
-              Symbol.iterator in r
-            ) {
+            else if (r && typeof r === 'object' && Symbol.iterator in r) {
               lists.push([...(r as Iterable<unknown>)])
             }
           }
@@ -186,7 +207,7 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   const controller = new TokenOptimaController(rootCtx, fold, replay)
 
-  installEffortPolicy(ctx, config, fold)
+  installEffortPolicy(ctx, config, fold, health)
 
   const loose = ctx as unknown as LooseCtx
 
@@ -212,6 +233,7 @@ export function apply(ctx: Context, config: ConfigType): void {
   setTimeout(replay, 6000)
 
   const replayTimer = setInterval(replay, 5000)
+  const healthTimer = setInterval(checkSessionsSvc, 30_000)
 
   loose.on('session/event', (s: unknown) => {
     try {
@@ -238,6 +260,7 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   loose.on('dispose', () => {
     clearInterval(replayTimer)
+    clearInterval(healthTimer)
     fold.dispose()
   })
 

@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "noCheck": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "outDir": ".build/host"
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/client/**/*", "src/**/*.tsx", "tests", "examples"]
+}

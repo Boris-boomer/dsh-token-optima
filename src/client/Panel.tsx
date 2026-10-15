@@ -91,12 +91,30 @@ function savePos(p: { x: number; y: number }): void {
   }
 }
 
+function downloadBlob(filename: string, content: string, mime: string): void {
+  try {
+    const blob = new Blob([content], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.style.display = 'none'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (err) {
+    console.error('[dsh-token-optima] download failed:', err)
+  }
+}
+
 export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose }) => {
   const [report, setReport] = useState<Report | null>(null)
   const [composition, setComposition] = useState<CompositionEntry[]>([])
   const [groups, setGroups] = useState<GroupEntry[]>([])
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const [pos, setPos] = useState<{ x: number; y: number } | null>(() => loadPos())
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
@@ -197,6 +215,27 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
     }
   }, [ctx, sessionId])
 
+  const handleExport = async (): Promise<void> => {
+    const svc = getService(ctx)
+    if (!svc || !sessionId || exporting) return
+    setExporting(true)
+    try {
+      const r = await svc.exportCsv(sessionId)
+      const csv = (r?.value ?? r) as string
+      if (typeof csv !== 'string' || csv.length === 0) {
+        setError('导出为空')
+        return
+      }
+      const shortId = sessionId.slice(-8)
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      downloadBlob(`token-optima-${shortId}-${ts}.csv`, csv, 'text/csv;charset=utf-8')
+    } catch (err) {
+      setError(`导出失败：${(err as Error).message}`)
+    } finally {
+      setExporting(false)
+    }
+  }
+
   const trend: TrendEntry[] = (report?.history ?? []).slice(-30).map((t) => {
     const groupsRecord: Record<string, number> = {}
     const groupIds: Record<string, number[]> = {
@@ -249,6 +288,18 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
 
   const statValueStyle: CSSProperties = {
     fontWeight: 600,
+  }
+
+  const iconBtnStyle: CSSProperties = {
+    background: 'none',
+    border: `1px solid ${dark ? colors.border : colors.borderLight}`,
+    borderRadius: 6,
+    color: colors.muted,
+    cursor: 'pointer',
+    fontSize: '0.85em',
+    padding: '0.2em 0.5em',
+    lineHeight: 1.2,
+    fontFamily: 'inherit',
   }
 
   const positionStyle: CSSProperties = pos
@@ -306,21 +357,40 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             {title || '（无标题）'} · {shortId}
           </div>
         </div>
-        <button
-          onClick={onClose}
+        <div
+          style={{ display: 'flex', gap: '0.4em', alignItems: 'center' }}
           onMouseDown={(e) => e.stopPropagation()}
-          style={{
-            background: 'none',
-            border: 'none',
-            color: colors.muted,
-            cursor: 'pointer',
-            fontSize: '1.4em',
-            padding: 0,
-            lineHeight: 1,
-          }}
         >
-          ×
-        </button>
+          <button
+            onClick={handleExport}
+            onMouseDown={(e) => e.stopPropagation()}
+            disabled={!sessionId || exporting || !report?.latest}
+            style={{
+              ...iconBtnStyle,
+              opacity: !sessionId || exporting || !report?.latest ? 0.4 : 1,
+              cursor:
+                !sessionId || exporting || !report?.latest ? 'not-allowed' : 'pointer',
+            }}
+            title="导出 CSV"
+          >
+            {exporting ? '...' : 'CSV'}
+          </button>
+          <button
+            onClick={onClose}
+            onMouseDown={(e) => e.stopPropagation()}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: colors.muted,
+              cursor: 'pointer',
+              fontSize: '1.4em',
+              padding: 0,
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        </div>
       </div>
 
       {!sessionId && (

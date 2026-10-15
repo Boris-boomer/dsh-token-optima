@@ -261,43 +261,6 @@ export const TYPERT_REMOTE = {
         create: passthrough,
       },
     },
-    {
-      id: 'dsh-token-optima#tokenOptima/debugSeenEventTypes',
-      service: 'tokenOptima',
-      namespace: 'tokenOptima',
-      method: 'debugSeenEventTypes',
-      invocation: { kind: 'direct' },
-      parameters: [],
-      result: {
-        mode: 'strict',
-        typeSymbol: 'dsh-token-optima#debugSeenEventTypes:result',
-        create: passthrough,
-      },
-    },
-    {
-      id: 'dsh-token-optima#tokenOptima/debugToolCallCount',
-      service: 'tokenOptima',
-      namespace: 'tokenOptima',
-      method: 'debugToolCallCount',
-      invocation: { kind: 'direct' },
-      parameters: [
-        {
-          name: 'sessionId',
-          wire: 'sessionId',
-          source: 'json',
-          codec: {
-            mode: 'strict',
-            typeSymbol: 'dsh-token-optima#debugToolCallCount:sessionId',
-            create: passthrough,
-          },
-        },
-      ],
-      result: {
-        mode: 'strict',
-        typeSymbol: 'dsh-token-optima#debugToolCallCount:result',
-        create: passthrough,
-      },
-    },
   ],
 }
 

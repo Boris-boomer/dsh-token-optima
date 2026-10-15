@@ -61,7 +61,6 @@ export class SessionFold {
 
   private observedEventCount = 0
   private recentEventTypes: string[] = []
-  private seenEventTypes = new Set<string>()
   private loggedShapes = new Set<unknown>()
   private foldFailures = 0
 
@@ -72,8 +71,6 @@ export class SessionFold {
     reason: string
     at: number
   }> = []
-
-  private reportedUnsupported = new Set<string>()
 
   private cacheRisks: CacheRisk[] = []
 
@@ -117,10 +114,6 @@ export class SessionFold {
     return this.foldFailures
   }
 
-  getSeenEventTypes(): string[] {
-    return [...this.seenEventTypes].sort()
-  }
-
   /* ---------------- 对外查询 ---------------- */
 
   getBudgetTracker(): BudgetTracker {
@@ -132,14 +125,6 @@ export class SessionFold {
       return this.cacheRisks.filter((r) => r.sessionId === sessionId).slice(-20)
     }
     return this.cacheRisks.slice(-20)
-  }
-
-  hasReportedUnsupported(sessionId: string): boolean {
-    return this.reportedUnsupported.has(sessionId)
-  }
-
-  markReportedUnsupported(sessionId: string): void {
-    this.reportedUnsupported.add(sessionId)
   }
 
   recordEffortDecision(d: {
@@ -289,10 +274,6 @@ export class SessionFold {
 
   private foldEvent(state: InternalState, event: Record<string, unknown>): void {
     const type = typeof event['type'] === 'string' ? (event['type'] as string) : ''
-    if (type && !this.seenEventTypes.has(type)) {
-      this.seenEventTypes.add(type)
-    }
-
     const data = (event['data'] ?? {}) as Record<string, unknown>
 
     switch (type) {
@@ -642,7 +623,6 @@ export class SessionFold {
     this.reasoning.reset()
     this.loggedShapes.clear()
     this.effortDecisions.length = 0
-    this.reportedUnsupported.clear()
     this.cacheRisks.length = 0
     this.currentSessionId = ''
   }

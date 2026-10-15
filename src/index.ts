@@ -99,16 +99,6 @@ class TokenOptimaController extends TypertRemoteService {
   async debugLastEvents(): Promise<string[]> {
     return this.fold.getRecentEventTypes()
   }
-
-  @Remote
-  async debugSeenEventTypes(): Promise<string[]> {
-    return this.fold.getSeenEventTypes()
-  }
-
-  @Remote
-  async debugToolCallCount(sessionId: string): Promise<number> {
-    return this.fold.getToolCallCount(sessionId)
-  }
 }
 
 function safeGet(obj: unknown, key: string): unknown {

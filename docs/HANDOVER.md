@@ -54,6 +54,9 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 ✅ reasoning_effort 动态调整（仅当模型 adapter 允许）
 ✅ DSH 接口版本探针（4 项探测，失败时面板红字 + health.json）
 ✅ 数据可信度指示器（估算偏差 / 未归因 / fold 失败）
+✅ tool/call 精确计数（从 `session/event` 流的 `tool/call` 事件累计）
+✅ adapter 能力探测（`ctx.get('llm').resolveModelInfo` 探测 reasoning 支持；
+   不支持时显式标 unsupported，支持时自动注入 reasoningEffort）
 
 ### 它不能做什么
 
@@ -63,6 +66,7 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 ❌ 遥测上报（OTel 未接入）
 ❌ 多用户/多设备同步
 ❌ 反检测（不隐藏自己的存在，也不防 DSH 结构变化）
+❌ 强制 adapter 支持 reasoningEffort（只探测，不篡改 adapter 声明）
 
 ### 能跑吗
 
@@ -146,6 +150,8 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 | 推理 token 生命周期追踪 | `core/reasoning.ts` |
 | 哈希加盐（默认） | `config.hashSalt` |
 | 隐私：不存 prompt 原文 | 全局不存储，只存哈希和 token 数 |
+| tool/call 计数 | `host/session-fold.ts` 的 `foldEvent` 里累计 `tool/call` 事件 |
+| adapter reasoning 能力探测 | `host/effort-policy.ts` 的 `resolveModelEfforts` |
 
 ### 清单 B — 已实现但不符合方案 / 妥协
 
@@ -153,7 +159,7 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 |---|---|---|
 | 精确 DeepSeek tokenizer（WASM） | 字符加权估算 | 精度 51-79%，方案要求"优先 WASM" |
 | 归因偏差对齐阈值 3% | 实现了，但用字符估算偏差常超 3%，实际走 `unattributed` 兜底 | 方案要求"若超阈值优先信任 API 真值"，做了，但大部分轮次都在兜底 |
-| reasoning_effort 动态调整 | 代码完整，但只在 seed 里显式带 `reasoningEffort` 时生效 | 大部分第三方 adapter（hermes/ollama）不生效 |
+| reasoning_effort 动态调整 | 代码完整，探测 adapter 能力后注入；不支持时显式 unsupported | 当前 amd-radeon adapter 不支持，功能就绪但环境不通 |
 | 隐私：遥测 opt-in | 没做遥测 | 方案要求"默认关，可开"，实际是"根本没有" |
 | 数据 TTL | 没做 | 方案要求"可配置保留期限" |
 | SBOM | 没做 | 方案要求"发布使用" |
@@ -316,6 +322,11 @@ DSH（DeepSeek Harness）的 Token 监测插件。运行在 Cordis 插件框架�
 它们在 npm 上有，但依赖链里含不在 npm 的包（`dsh-type-meta`），
 会导致 `pnpm install` 报 `ERR_PNPM_FETCH_404`。详见 §7.9。
 
+**不要给 peerDependencies 写显式版本号（`^x.y.z`）**：会触发 lockfile 重算，
+进而暴露 §7.9 的断链。保持 `*`。编译期用 `devDependencies` 里的
+具体版本（如 `@deepseek-ai/dsh-typert-protocol@0.2.0-rc.2`），
+运行时由 DSH 提供。见 §7.10。
+
 ### 4.6 cordis.patch.yml 格式
 
     - insert:
@@ -378,6 +389,29 @@ client target：
 - 挂 `root` 侧：entry 正常触发
 - 但 **不能只挂 root**，可能某些 DSH 版本派发到 ctx
 
+**关键坑 3**：`ctx.llm` 是 getter，读它会触发 Cordis 服务解析。
+在 `apply()` 顶层直接 `(ctx as any).llm` 读，如果服务未就绪会**抛错**，
+导致整个 `apply()` 挂掉，插件加载失败，client 端图标不挂。
+正确做法：
+
+    // 错误：顶层属性读，可能抛错
+    const llm = (ctx as any).llm
+
+    // 正确：用 .get() 并包 try/catch
+    let llm: unknown = undefined
+    try {
+      llm = (ctx as any).get?.('llm')
+    } catch {
+      llm = undefined
+    }
+
+`ctx.get()` 是 Cordis 标准 API，读不出来返回 `undefined` 而不抛错。
+
+**关键坑 4**：插件 `apply()` 抛错**不产生崩溃日志**。DSH 进程没崩，
+但 client 端 boot 会卡在 `pending (waiting for service: remote.tokenOptima)`，
+图标不挂。这时 `~/AppData/Roaming/@deepseek-ai/dsh-desktop/logs/`
+里**没有新的 crash 文件**。排查见 §9。
+
 ### 4.9 DSH 事件类型（通过运行时探测）
 
 已确认的 event type 列表：
@@ -408,6 +442,30 @@ client target：
 - `session/event` — payload: `(session)`。每次会话产生新事件时触发。
 - `dispose` — 插件销毁。
 
+### 4.9.1 `tool/call` 事件（v0.3.1 确认）
+
+`tool/call` **确实在 `session/event` 流里**。事件结构：
+
+    {
+      type: 'tool/call',
+      seq: 19,
+      time: 1792067989399,
+      data: {
+        turn: 1,
+        step: 1,
+        callId: 'call_...',
+        name: 'pwsh',
+        arguments: '{"command":"..."}'
+      }
+    }
+
+对应的 assistant 消息里也有 `{ type: 'tool-call' }` 内容块，但**只统计
+`tool/call` 事件即可**，两个来源同时统计会翻倍。
+
+**之前误判 tool/call 不在事件流的原因**：测试会话没触发 tool 调用
+（消息太短，模型直接回答）。**验证 tool 相关功能必须明确让 agent 调工具**，
+比如「列出 D:\ai_hands_on\projects 下的目录」。
+
 ### 4.10 session 对象结构
 
 **真 Session 对象**（标志：`id` 是字符串 **且** `seq` 是数字）：
@@ -434,6 +492,24 @@ client target：
     typeof s.id === 'string' && typeof s.seq === 'number'
 
 用 id 做 Map 键去重，不要用对象引用。
+
+### 4.10.1 同一个逻辑会话的三层包装
+
+一个逻辑会话至少对应三种不同的 JS 对象：
+
+1. **fold 收到的对象**（真 Session）：有 `id`（字符串）+ `seq`（数字）+
+   `eventAt` 方法 + `surface.nodes`。这是唯一能 fold 的对象
+2. **`ctx.sessions.list()` 返回的对象**（包装器）：有 `sessionId` 字段
+   （**不是 `id`**），可能没有 `eventAt` / `surface.nodes`
+3. **`ctx.sessions.manager.sessions.get(id)` 返回的对象**：`ctor: Session`，
+   有 `sessionId`（不是 `id`）、`events`（SessionEventStream）、
+   `eventSource`（MutableSessionEventSource），**没有** `eventAt` / `surface.nodes`
+
+**判定真 Session 的唯一可靠方法**：
+
+    typeof s.id === 'string' && typeof s.seq === 'number'
+
+不要用 `sessionId` 字段判断（那是包装器的标志）。
 
 ### 4.11 事件数据结构
 
@@ -562,6 +638,21 @@ client 侧：
 `inject: ['remote.myService']`，但自己创建的服务进不了静态 inject 列表。
 会 pending 到超时。
 
+**关键约束**：**host 端 `@Remote` 方法改了，必须同步改
+`src/client/descriptors.ts`**。descriptors 是 client 侧的 Remote 方法注册表，
+host 加了新方法但 client 没声明，调 `svc.newMethod()` 会报
+`is not a function`。
+
+**另一个约束**：descriptors 改了之后，**client bundle 必须重新构建**。
+只重启 DSH 不重 build，client 侧还是旧 bundle，新方法不可见。
+症状是 `typeof svc.newMethod === 'undefined'`（不是 `'function'`，
+也不是抛 `is not a function`——两个阶段报错形式不同）。
+
+**当前策略（v0.3.1）**：**不轻易加 Remote 方法**。每个新方法都要改两处
+（host `@Remote` + client descriptors），且必须重建 client bundle。
+非必要不加。v0.3.1 已删除 `debugSeenEventTypes` / `debugToolCallCount`
+两个只为诊断存在的方法（见 §7.18）。
+
 ### 4.14 客户端相关
 
 - client 端**没有 zod**。`import { z } from 'zod'` 会导致
@@ -635,6 +726,12 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
 
 正确救火方式：手动从 profile package.json 删掉出问题的插件。
 
+**崩溃日志位置**：`~/AppData/Roaming/@deepseek-ai/dsh-desktop/logs/`，
+文件名格式 `crash-<ISO时间戳>-<phase>.log`，phase 有 `web-boot` / `host` 两种。
+**注意**：崩溃日志只在**真的崩溃**时产生。如果只是插件 `apply()` 抛错
+导致图标不挂但进程没崩，**没有崩溃日志**——这时要靠 client 侧 remote
+通道超时或面板红字判断。
+
 ### 4.19 关键文件位置
 
 - 插件源码：`D:\ai_hands_on\projects\ai-workflow\blocks\07-dsh-token-optima`
@@ -642,6 +739,7 @@ DSH 启动后 `session/event` 只对**新事件**触发。历史需要主动重�
 - 已挂插件：`~/.dsh/profiles/desktop/node_modules/dsh-token-optima`
   （软链到源码目录）
 - 崩溃日志：`~/AppData/Roaming/@deepseek-ai/dsh-desktop/logs/`
+- 健康探针输出：`~/.dsh/token-optima-health.json`
 
 ### 4.20 当前会话识别（v0.3.1 逆向）
 
@@ -669,7 +767,47 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
 - 原因：DSH 的 peer 依赖链里含不在 npm registry 的包
 - 触发条件：任何导致 lockfile 重新解析的操作（改 package.json、清 node_modules、换机器）
 - **当前绕过**：不动 package.json、不删 node_modules、不动 lockfile
-- 真正修法（未做）：`pnpm overrides` 把断链包指到本地 stub
+- **结论（v0.3.1）**：`pnpm overrides` 的方案**不做**。理由：
+  - 需要维护本地 stub 目录（要写 package.json + 空的 index.js）
+  - stub 需要 .gitignore 或提交进仓库，二者都有维护成本
+  - 当前 lockfile 里所有包都有 integrity hash、都能 fetch，**没有断链**
+  - 断链只在**往 peerDependencies 加 `dsh-session` / `dsh-agent` 时**发生。
+    既然不加（§7.9），就没有触发条件
+  - **保持现状**：不改 package.json 的 peerDependencies（保持 `*`），
+    不删 node_modules
+
+### 4.22 新增 DSH 事实 — Cordis 事件派发位置
+
+- `agent/request` waterfall **在 root ctx 侧触发**（不是 plugin ctx）
+- plugin ctx 侧挂的 handler 会 `attached` 但**从不 entry**
+- 必须双注册（不同函数引用，避免 Cordis 引用去重，见 §4.8 关键坑 1）
+
+### 4.23 新增 DSH 事实 — session 对象有三层包装
+
+见 §4.10.1。
+
+### 4.24 新增 DSH 事实 — Remote 方法必须在 client descriptors 声明
+
+见 §4.13 的「关键约束」段。
+
+### 4.25 新增 DSH 事实 — `ctx.llm.resolveModelInfo` 探测 reasoning 能力
+
+`ctx.llm.resolveModelInfo(provider, model, signal)` 返回模型元信息。
+若 `info.reasoning` 存在，其结构大致为：
+
+    reasoning: {
+      defaultEffort: 'high',
+      efforts: ['low', 'high', 'max']  // 或 [{id: 'low'}, ...]
+    }
+
+`info.reasoning === undefined` → 该 adapter 不支持 reasoningEffort。
+
+**实测（v0.3.1，amd-radeon / DeepSeek-V4.1-Flash）**：
+
+- `llm=1 fn=1 reas=0 eff=0` → `info.reasoning` 是 undefined → adapter 不支持
+- 结论：当前环境走 unsupported 分支，代码路径正确
+
+**如何读 `ctx.llm`**：见 §4.8 关键坑 3，必须 `ctx.get('llm')` + try/catch。
 
 ---
 
@@ -693,8 +831,12 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
     │   └── index.ts                re-export
     ├── host/
     │   ├── session-fold.ts         核心：事件重放 + 状态 + 查询
+    │   ├── surface-parsers.ts      纯函数：extractText / classifySource /
+    │   │                           normalizeUsage / signatureOf /
+    │   │                           extractReasoningText
     │   ├── health-probe.ts         DSH 接口版本探针（v0.3.1 新增）
-    │   ├── effort-policy.ts        agent/request hook + 当前会话识别
+    │   ├── effort-policy.ts        agent/request hook + 当前会话识别 +
+    │   │                           adapter reasoning 能力探测
     │   ├── tools.ts                两个只读工具注册
     │   ├── store-csv.ts            CSV 导出
     │   └── index.ts                re-export
@@ -710,20 +852,22 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
 
 ### 关键类：SessionFold
 
-`src/host/session-fold.ts` 是最核心的文件，约 640 行。
+`src/host/session-fold.ts` 是最核心的文件，约 600 行。
 
 职责：
 - 维护 session 状态：`byId: Map<sessionId, InternalState>`
 - `observe(session)` — 从上次 cursor 推进到 `session.seq`，
   逐个 fold 事件。同时调 `health.checkSession(session)` 做接口健康检查
-- `foldEvent(state, event)` — 事件分发
+- `foldEvent(state, event)` — 事件分发。`tool/call` 事件在这里累计
+  `state.toolCallCount`
 - `settleTurn` — 处理 `assistant/message`，触发归因
 - `checkSurfaceChange` — 检测 surface 变动，记录 cache risk
 - 对外查询：`report` / `composition` / `groups` / `listSessions` /
   `exportCsv` / `audit`
 - effort 决策记录：`recordEffortDecision` / `getEffortDecisions`
 - cache 风险记录：`getCacheRisks`
-- 当前会话：`setCurrentSession` / `getCurrentSession`（v0.3.1 新增）
+- 当前会话：`setCurrentSession` / `getCurrentSession`
+- tool call 计数：`getToolCallCount(sessionId)`
 
 ### 关键类：HealthProbe
 
@@ -736,6 +880,19 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
 - 跳过包装器 session 对象（用 `id` 是字符串 + `seq` 是数字 判断）
 - `snapshot()` 在 `report()` 里被调用，返回给面板显示
 
+### 模块：surface-parsers.ts
+
+`src/host/surface-parsers.ts`（v0.3.1 新增，从 `session-fold.ts` 抽出）。
+
+5 个纯函数，零状态：
+- `extractText(event)` — 从事件提取纯文本
+- `extractReasoningText(event)` — 从 stream 提取 reasoning 文本
+- `classifySource(type, text)` — 事件类型 → 来源分类
+- `normalizeUsage(usage)` — DSH usage 结构 → DeepSeekUsage
+- `signatureOf(seqs)` — surface seq 列表 → 短签名
+
+这些函数**没有 DSH 依赖**，单元测试可以直接打。
+
 ### 数据流
 
     用户发消息
@@ -747,6 +904,7 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
     │  → fold.observe(session)    │
     │    → health.checkSession()  │
     │    → foldEvent(state, event)│
+    │      → tool/call 累计        │
     │      → 累积 surface 节点     │
     │      → assistant/message 时: │
     │         → attributeTurn()   │
@@ -757,6 +915,8 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
     │ agent/request waterfall:    │
     │  → fold.setCurrentSession() │
     │  → effort 决策              │
+    │    → 探测 adapter 能力       │
+    │    → 支持时注入 effort       │
     └─────────────────────────────┘
       ↓
     byId 里存 turns / cacheRisks / effortDecisions
@@ -807,6 +967,33 @@ fetch hook 保留当兜底（初始挂载时可能有用）。
 
 Panel 每 2 秒轮询 `svc.report(sessionId)`，拿数据重渲染。
 
+### effort 决策流程（v0.3.1）
+
+`src/host/effort-policy.ts` 的 `agent/request` handler：
+
+1. `next()` 拿 seed
+2. `fold.setCurrentSession(sessionId)` 记录当前会话
+3. `toolCalls = fold.getToolCallCount(sessionId)` 拿 tool 计数
+4. 若 `seed.reasoningEffort` 是字符串：
+   - 走复杂度分类 + 预算降级路径
+   - `decideEffort()` 可能改 `seed.reasoningEffort`
+5. 若 `seed.reasoningEffort` 不是字符串：
+   - 从 seed 取 `provider` / `model`
+   - 调 `llm.resolveModelInfo(provider, model, signal)` 探测
+   - 探测结果缓存到 `effortProbeCache`（按 `provider#model` 为 key）
+   - `reasoning` 存在 → 从 `efforts` 里选目标 level 注入
+   - `reasoning` 不存在 → 记 `unsupported`，不改 seed
+
+**`resolveModelEfforts` 的防御性解析**：
+- `info.reasoning` 不存在 → 返回 null
+- `efforts` 里元素是字符串或 `{ id: string }` 都接受
+- `defaultEffort` 不在 `efforts` 里 → 退回 `efforts[0]`
+- 任何抛错 → 返回 null
+
+**读 `ctx.llm` 的注意事项**：见 §4.8 关键坑 3，必须
+`ctx.get('llm')` + try/catch。在 `installEffortPolicy` 里读**一次**
+缓存到闭包变量，handler 里不再读。
+
 ---
 
 §6 数据流细节
@@ -821,9 +1008,10 @@ Panel 每 2 秒轮询 `svc.report(sessionId)`，拿数据重渲染。
 4. 发起 LLM 请求前，dispatch waterfall `agent/request`
    - 我们的 handler 读 seed，判断 current effort
    - `seed.reasoningEffort` 存在时可能修改
+   - 不存在时尝试探测 adapter 能力并注入（v0.3.1）
    - `fold.setCurrentSession(sessionId)` 记录当前会话
 5. LLM 返回，产生 `assistant/message`（带 `usage` 和 `stream`）
-6. 如果有 tool call，继续 `tool/result`
+6. 如果有 tool call，继续 `tool/call` → `tool/result` 事件
 7. 下一 step 或结束
 
 我们的 `foldEvent` 响应第 3、5、6 步的事件，累积 surface；
@@ -879,6 +1067,60 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 - `src/core/index.ts` 的 re-export 删除
 - `tests/compressor.test.ts` 删除
 
+**7.7 effort.toolCalls 恒为 0** —— ✅ 已修
+
+- 症状：复杂度分类器第二个参数始终是 0
+- 根因（两次）：
+  1. 之前测的会话**没触发 tool 调用**，模型直接回答
+  2. `unsupported` 分支的门控（`hasReportedUnsupported`）锁死首条记录，
+     面板永远显示第一次请求（此时 toolCallCount 还是 0）
+- 修法：
+  1. `session-fold.ts` 的 `foldEvent` 在 `case 'tool/call'` 里
+     `state.toolCallCount++`
+  2. `getToolCallCount(sessionId)` 返回 `state.toolCallCount`，
+     为 0 时退回 surface 里 `tool_result` 节点数兜底
+  3. `effort-policy.ts` 去掉 unsupported 分支的门控，每次 agent/request
+     都记录 decision，面板取最后一条
+- 验证：用「列出 D:\ai_hands_on\projects 下的目录」触发 pwsh，
+  面板 `(toolCalls=1)` ✅
+- **陷阱**：不要在 `assistant/message` 里额外统计 `content` 里的
+  `type === 'tool-call'` 块——会和 `tool/call` 事件双重计数
+
+**7.8 session-fold.ts 过大** —— ⚠️ 部分修
+
+- 现状：约 600 行，仍承担重放、状态、查询、cache 风险四职责
+- v0.3.1 抽出 `src/host/surface-parsers.ts`（5 个纯函数）
+- 剩余拆分（`replay.ts` / `state.ts` / `queries.ts` / `risks.ts`）
+  未做。风险大于收益，暂缓
+
+**7.10 typert-protocol 版本差异** —— ✅ 已修
+
+- 现象：本地 `devDependencies` 装的是 `@deepseek-ai/dsh-typert-protocol@0.1.0-rc.6`，
+  但 DSH 运行时实际加载的是 `0.2.0-rc.2`
+- 发现方式：读 asar 里官方包的 `peerDependencies`，全部写 `0.2.0-rc.2`
+- 风险：编译期用旧版类型检查，运行时用新版实现。若 `@Remote` 装饰器或
+  `TypertRemoteService` 构造签名变化，会编译过但运行时挂载失败
+- 修法：`pnpm add -D @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2`
+- `peerDependencies` 保持 `*`（运行时由 DSH 提供，编译期用本地，见 §4.5）
+- 修复时间：2026-10-15
+- 验证：build 通过 + DSH 重启后面板/Remote 通道正常
+
+**7.18 Remote 方法从 host 加到 client 不到** —— ✅ 已修
+
+- 症状：host 侧 `@Remote` 加了新方法，client 侧 `svc.newMethod`
+  是 `undefined`（不是 `'function'`），调它报 `is not a function`
+- 根因：
+  1. client 侧 `descriptors.ts` 没同步加 entry
+  2. client bundle 没重建（只重启 DSH 不够）
+- 处理：**直接删掉这两个 debug 方法**（`debugSeenEventTypes` /
+  `debugToolCallCount`），不再追这条线。理由：
+  - 它们当初是给诊断 `tool/call` 用的，那个问题已用 console.log 落盘解决
+  - 每次加 Remote 方法都要改 host + client 两处，容易忘
+  - 保留 `debugEventCount` / `debugLastEvents`（原本就有 entry，通道是通的）
+- 相关死代码一起清：`getSeenEventTypes` / `seenEventTypes` /
+  `hasReportedUnsupported` / `markReportedUnsupported` / `reportedUnsupported`
+- 修复时间：2026-10-15
+
 ### 已修（历史）
 
 **7.16 EstimatedTokenizer 尾块 tokens 误判** —— ✅ 已修
@@ -919,17 +1161,6 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 - 风险：恶意 client 可以传任意数据
 - 修法：如果安全重要，手写简易 zod 替换；如果自己用，可接受
 
-**7.7 effort.ts 的 toolCalls 一直为 0**
-
-- 位置：`src/host/effort-policy.ts` 调用 `extractSignals(..., 0, null)`
-- 现象：复杂度分类器少了一个信号
-- 修法：从 session surface 统计 tool call 数量传进去
-
-**7.8 session-fold.ts 过大**
-
-- 位置：约 640 行，承担了重放、状态、查询、cache 风险四职责
-- 修法：拆成 `replay.ts` / `state.ts` / `queries.ts` / `risks.ts`
-
 ### 中优先级
 
 **7.9 隐式依赖未声明** —— 结论：不修
@@ -945,28 +1176,22 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 - 影响：`pnpm install` 的依赖检查看不到这两个包。如果未来 DSH 改变它们
   的接口，只能靠运行时版本探针（§7.1）发现
 
-**7.10 版本差异**
-
-- 本地装的 `@deepseek-ai/dsh-typert-protocol@0.1.0-rc.6`
-- DSH 运行时是 `0.2.0-rc.2`
-- 装饰器 API 可能不完全兼容
-- 修法：`pnpm add -D @deepseek-ai/dsh-typert-protocol@0.2.0-rc.2`，
-  升级后**必须跑一遍面板**（不能只看 build 过）
-
-**7.15 预算降级无法验证（adapter 限制）**
+**7.15 预算降级无法验证（adapter 限制）** —— ⚠️ 代码就绪，环境不通
 
 - 现象：config 设 `budgetSession: 10` 后降级不生效
 - 原因：`agent/request` waterfall 的 seed 里没有 `reasoningEffort`
-  字段（当前 adapter hermes/ollama 不暴露），代码走 unsupported 分支
-- 结论：代码正确，受 adapter 限制。未来接 DeepSeek 官方 API 时才能验证
+  字段（当前 adapter amd-radeon 不暴露）
+- v0.3.1 加了 adapter 探测：`resolveModelInfo` 返回
+  `reas=0 err=reasoning-undef`，证实 adapter 确实不支持
+- 结论：代码正确，受 adapter 限制。切到 DeepSeek 官方 API 时才能验证
 - 验证时间：2026-10-15
 
-**7.17 依赖树不可复现**
+**7.17 依赖树不可复现** —— ✅ 结论：不修
 
 - 见 §4.21
-- 现状：`pnpm install` 在干净环境下失败
-- 绕过：不动 package.json、不删 node_modules、不动 lockfile
-- 修法（未做）：`pnpm overrides` 把断链包指到本地 stub
+- 现状：`pnpm install` 在干净环境下失败（`ERR_PNPM_FETCH_404`）
+- 绕过：不动 package.json（保持 peerDependencies 为 `*`）、不删 node_modules
+- `pnpm overrides` 方案不做，理由见 §4.21
 
 ### 低优先级
 
@@ -993,45 +1218,49 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 §8 下一步建议
 -------------
 
-按性价比排：
+### 已完成（v0.3.1）
 
-### 立刻（30 分钟内）
-
-1. ~~删 `window.__tokenOptimaDebug`~~ ✅ 已做（debug 门控）
-2. ~~删 `compressor.ts` 死代码~~ ✅ 已做
-3. ~~把 `foldFailures` 显示在面板~~ ✅ 已做
-
-### 短期（几小时）
-
-4. ~~加 DSH 版本探针（§7.1）~~ ✅ 已做
-5. ~~写 `docs/DSH-INTERNALS.md`~~ —— 建议把本文档 §4 抽出来独立维护
-6. ~~`package.json` 补 peerDependencies~~ —— 结论：不修（§7.9）
-7. 更新 typert-protocol 到 0.2.0-rc.2（§7.10）
-8. 修 `effort.toolCalls` 恒为 0（§7.7）
-9. 把 §4 抽成 `docs/DSH-INTERNALS.md`，每条加版本标注
+- ✅ debug 门控（`window.__tokenOptimaDebug` 默认不挂）
+- ✅ 删 `compressor.ts` 死代码
+- ✅ `foldFailures` / 估算偏差 / 未归因 显示在面板
+- ✅ DSH 版本探针（§7.1）
+- ✅ 修 `effort.toolCalls` 恒为 0（§7.7）
+- ✅ 拆 `session-fold.ts`（§7.8 部分）：抽出 `surface-parsers.ts`
+- ✅ 升级 typert-protocol 到 `0.2.0-rc.2`（§7.10）
+- ✅ 清理 `hasReportedUnsupported` 死代码
+- ✅ 决定 `debugSeenEventTypes` / `debugToolCallCount` 去留：删（§7.18）
 
 ### 中期（几天）
 
-10. host 端单元测试（尤其 `session-fold.ts`）—— 先拆再测
-11. 拆分 `session-fold.ts`（§7.8）
-12. 真删 fetch hook（§7.4）
+1. host 端单元测试（尤其 `session-fold.ts` 和 `surface-parsers.ts`）
+2. 真删 fetch hook（§7.4）
+3. 把 §4 抽成 `docs/DSH-INTERNALS.md`，每条加版本标注
+4. 完全拆分 `session-fold.ts`（§7.8 剩余：replay / state / queries / risks）
 
 ### 长期（如果打算认真维护）
 
-13. Worker 隔离 + 背压队列（方案性能预算）
-14. OTel 遥测导出
-15. 文档重写，让每份与实际一致
-16. `pnpm overrides` 修依赖树（§7.17）
+5. Worker 隔离 + 背压队列（方案性能预算）
+6. OTel 遥测导出
+7. 文档重写，让每份与实际一致
+
+### G1 三条路径现状
+
+| 路径 | 状态 |
+|---|---|
+| 1. 预算降级 | 代码就绪，adapter 限制（amd-radeon 不支持 reasoningEffort） |
+| 2. reasoning 非零 | 代码就绪，adapter 限制 |
+| 3. 多块前缀断裂 | 无构造方法，转 D1（假 session 对象直接 fold 事件测） |
+
+切到 DeepSeek 官方 API 后，路径 1、2 会自动走 `injected` 分支，代码无需改动。
 
 ### 如果要做压缩
 
 不要自己重写。官方 `dsh-compaction-basic` 已经用 LLM 摘要做得很好了。
-唯一的增量空间是：
-- 在压缩**之前**检查是否值得（缓存命中率高时别压）
-- 在压缩**之后**评估效果（缓存命中率变化）
+唯一增量空间：
+- 压缩**前**检查是否值得（缓存命中率高时别压）
+- 压缩**后**评估效果（缓存命中率变化）
 
-那需要读 `dsh-compaction-basic` 的 `compactIfNeeded` 逻辑，
-目前没做。
+需要读 `dsh-compaction-basic` 的 `compactIfNeeded` 逻辑，目前没做。
 
 ---
 
@@ -1104,6 +1333,19 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 3. 手动验证：F12 跑 `__tokenOptimaDebug.service.report('')`，
    看返回的 `health` 字段
 
+### 面板显示"当前模型未启用 reasoningEffort 控制"
+
+含义：`seed.reasoningEffort` 不是字符串，且 adapter 探测返回 null。
+
+排查：
+
+1. 这是**当前 amd-radeon adapter 的预期行为**，不是 bug
+2. 若要验证探测逻辑：切到 DeepSeek 官方模型，面板应显示
+   `injected reasoningEffort=high (supported=[low,high,max])`
+3. 若怀疑探测本身有问题：临时在 `effort-policy.ts` 的
+   `unsupported` 分支 `reason` 里加诊断字符串，比如
+   `[probe llm=X fn=X reas=X eff=X err=...]`，验证完删除
+
 ### DSH 启动崩溃
 
 现象：弹窗"应用无法启动或已意外停止"，报错含 `pending (waiting for service: xxx)`。
@@ -1114,6 +1356,21 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 2. 手动从 `~/.dsh/profiles/desktop/package.json` 删掉出问题的插件
 3. `cd ~/.dsh/profiles/desktop && pnpm install`
 4. 重启
+
+### 图标不挂，但 DSH 进程没崩
+
+现象：右下角图标网格里没有 `◎`，DSH 正常启动。
+
+排查：
+
+1. 检查 `~/AppData/Roaming/@deepseek-ai/dsh-desktop/logs/` 有无
+   `crash-*.log`。**没有**说明 host 侧 `apply()` 抛错导致插件加载失败，
+   但不是进程崩溃
+2. 检查 client 侧 console 有无 `pending (waiting for service: remote.tokenOptima)`
+3. **最常见原因**：`apply()` 顶层读了 `ctx.xxx` 触发 Cordis 服务解析抛错。
+   见 §4.8 关键坑 3
+4. 救火：`node -e "import('file:///<绝对路径>/lib/index.mjs').then(m => console.log('LOADED', Object.keys(m)))"`
+   确认模块本身能加载；再逐个回退最近改的 host 文件，定位是哪个文件
 
 ### 数据不更新
 
@@ -1170,6 +1427,9 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
   — 官方压缩实现
 - `<目录>\dsh\node_modules\@deepseek-ai\dsh-token-meter\lib\index.js`
   — 官方 token 计量，看它的 tokenizer 实现
+- `<目录>\dsh\node_modules\@deepseek-ai\dsh-llm\lib\index.js`
+  — LLM 层，`resolveModelInfo` / `resolveCallWithInfo` /
+  `adapterDefaults` 逻辑都在这里（v0.3.1 探测 reasoning 能力时读过）
 
 ---
 
@@ -1184,6 +1444,14 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
   - EstimatedTokenizer 尾块 round bug 修复
   - compressor.ts 死代码删除
   - 测试数量从 24 → 15（删了 compressor 测试）
+  - tool/call 精确计数（`foldEvent` 累计 + `getToolCallCount`）
+  - session-fold.ts 抽出 `surface-parsers.ts`（5 个纯函数）
+  - effort-policy.ts 加 adapter 能力探测（`ctx.get('llm').resolveModelInfo`）
+  - effort unsupported 分支去门控，每次请求都记录 decision
+  - 修 `ctx.llm` 属性读取导致的 apply() 崩溃（改 `ctx.get('llm')`）
+  - typert-protocol 升级到 0.2.0-rc.2（与 DSH 运行时对齐）
+  - 删除 `debugSeenEventTypes` / `debugToolCallCount` 两个 Remote 方法及死代码
+  - version bump 到 0.3.1
   - 本次更新交接文档
 
 - v0.3.0
@@ -1214,6 +1482,16 @@ surface 的每个节点（system/user/assistant/tool 消息）都是有顺序的
 v0.3.1 之后，它从「随时可能静默死」变成「坏了会告诉你哪坏了」——
 DSH 接口探针、数据可信度指示器、debug 门控三项补齐，让它在 DSH 升级时
 能**显式报错**，而不是面板空白让你猜。
+
+v0.3.1 还补了两项逆向得来的关键能力：
+- **tool/call 精确计数**（之前一直为 0，因为测试会话没触发 tool，
+  且 unsupported 门控锁死了首条记录）
+- **adapter reasoning 能力探测**（`ctx.llm.resolveModelInfo` 探测
+  effort 支持列表，不支持时显式 unsupported，支持时自动注入）
+
+同时把 typert-protocol 从 `0.1.0-rc.6` 升级到 `0.2.0-rc.2`，
+与 DSH 运行时对齐——编译期和运行时的装饰器版本一致，消除了一类
+隐蔽的运行时风险。
 
 剩下的短板集中在两处：
 1. **tokenizer 精度**（51-79%）—— 已评估不做 WASM，接受兜底

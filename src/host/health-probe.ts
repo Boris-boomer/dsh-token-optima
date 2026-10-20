@@ -13,7 +13,8 @@ export interface HealthReport {
   failures: HealthFailure[]
 }
 
-const HEALTH_FILE = join(homedir(), '.dsh', 'token-optima-health.json')
+// 修改路径：存入 .dsh/token-optima/ 子目录，而不是直接扔在根目录
+const HEALTH_FILE = join(homedir(), '.dsh', 'token-optima', 'health.json')
 
 export class HealthProbe {
   private readonly failures = new Map<string, string>()

@@ -92,11 +92,15 @@ class TokenOptimaController extends TypertRemoteService {
 
   @Remote
   async debugEventCount(): Promise<number> {
+    // 安全门控：未开启 debug 时拒绝暴露内部诊断数据
+    if (!(this.fold as any).config?.debug) return -1
     return this.fold.getObservedEventCount()
   }
 
   @Remote
   async debugLastEvents(): Promise<string[]> {
+    // 安全门控：未开启 debug 时拒绝暴露内部诊断数据
+    if (!(this.fold as any).config?.debug) return []
     return this.fold.getRecentEventTypes()
   }
 }
@@ -139,9 +143,7 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   const checkSessionsSvc = (): void => {
     try {
-      const svc =
-        getServiceSafe(rootCtx, 'sessions') ??
-        getServiceSafe(ctx, 'sessions')
+      const svc = getServiceSafe(rootCtx, 'sessions') ?? getServiceSafe(ctx, 'sessions')
       health.checkSessionsService(svc)
     } catch (err) {
       health.fail('sessions 服务', `探测抛错：${(err as Error).message}`)
@@ -150,9 +152,7 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   const replay = (): void => {
     try {
-      const sessionsSvc =
-        getServiceSafe(rootCtx, 'sessions') ??
-        getServiceSafe(ctx, 'sessions')
+      const sessionsSvc = getServiceSafe(rootCtx, 'sessions') ?? getServiceSafe(ctx, 'sessions')
       health.checkSessionsService(sessionsSvc)
       if (!sessionsSvc || typeof sessionsSvc !== 'object') {
         fold.noteEvent('REPLAY: sessions service not found')

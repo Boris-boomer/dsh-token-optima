@@ -36,12 +36,11 @@ const Root: FC<RootProps> = ({ ctx }) => {
   const [open, setOpen] = useState(false)
   const [hostSessionId, setHostSessionId] = useState('')
   const [fetchSessionId, setFetchSessionId] = useState('')
-  const [manualSessionId, setManualSessionId] = useState('') // 新增：手动选择的历史会话
+  const [manualSessionId, setManualSessionId] = useState('')
   const [titles, setTitles] = useState<Record<string, string>>({})
   const [dark, setDark] = useState<boolean>(() => detectDark())
   const [font, setFont] = useState<InheritedFont>(() => readInheritedFont())
 
-  // 优先级：手动选择 > 宿主当前会话 > fetch 兜底
   const activeSessionId = manualSessionId || hostSessionId || fetchSessionId
 
   /* ---------- 主题 + 字体跟随 ---------- */
@@ -90,7 +89,6 @@ const Root: FC<RootProps> = ({ ctx }) => {
         const id = v?.currentSessionId ?? ''
         if (id) {
           setHostSessionId((prev) => {
-            // 如果宿主当前会话变了（比如发了新消息），清空手动选择，自动切回最新
             if (prev !== id && prev !== '') {
               setManualSessionId('')
             }
@@ -111,7 +109,13 @@ const Root: FC<RootProps> = ({ ctx }) => {
     }
   }, [ctx])
 
-  /* ---------- fetch hook：兜底抓 sessionId ---------- */
+  /* ---------- fetch hook：兜底抓 sessionId ----------
+   * 【开源声明】此处的 fetch 和 XMLHttpRequest 劫持，仅用于在本地读取 URL 中携带的 sessionId 参数。
+   * 本插件承诺：
+   * 1. 绝不修改请求内容、URL 或 Header。
+   * 2. 绝不拦截响应体。
+   * 3. 绝不将捕获的数据发送到除本地插件宿主之外的任何第三方。
+   */
   useEffect(() => {
     const origFetch = window.fetch
     const origOpen = XMLHttpRequest.prototype.open
@@ -270,7 +274,7 @@ const Root: FC<RootProps> = ({ ctx }) => {
       onClose={() => setOpen(false)}
       onSessionChange={(id) => {
         if (id === hostSessionId) {
-          setManualSessionId('') // 如果选的正好是当前活跃会话，取消手动锁定
+          setManualSessionId('')
         } else {
           setManualSessionId(id)
         }
@@ -283,7 +287,6 @@ let root: ReturnType<typeof createRoot> | null = null
 let host: HTMLDivElement | null = null
 
 export async function apply(ctx: any) {
-  // 1. 强力清理上一次残留的 DOM 容器和 React 实例
   document.querySelectorAll('[data-dsh-token-optima="1"]').forEach((el) => {
     try { el.remove() } catch { /* ignore */ }
   })
@@ -307,14 +310,12 @@ export async function apply(ctx: any) {
     console.error('[dsh-token-optima/client] ctx.remote.$mount not available')
   }
 
-  // 2. 创建全新的挂载点
   host = document.createElement('div')
   host.dataset.dshTokenOptima = '1'
   document.body.appendChild(host)
   root = createRoot(host)
   root.render(<Root ctx={ctx} />)
 
-  // 3. 清理并重新注册全局图标，防止出现多个重复的 icon
   const registry = ((window as any).__dshIconRegistry ||= []) as Array<{
     id: string
     icon: string
@@ -336,7 +337,6 @@ export async function apply(ctx: any) {
     onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
   })
 
-  // 4. 清理逻辑
   ctx.on('dispose', () => {
     root?.unmount()
     root = null

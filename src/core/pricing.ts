@@ -1,10 +1,14 @@
+// 费率适配器（独立模块，不硬编码在使用逻辑中）
+// 数据来源：https://api-docs.deepseek.com/quick_start/pricing
+// 获取日期：2026-10-20
+// 注意：价格可能随官方调整而变动，如有更新请及时修改此文件并提交 PR。
+
 export interface ModelPricing {
   hit: number       // 缓存命中输入 ($/M tokens)
   miss: number      // 缓存未命中输入 ($/M tokens)
   output: number    // 输出 ($/M tokens)
 }
 
-// 基于 DeepSeek 官方最新标准定价（单位：美元 / 1M tokens）
 export const PRICING_TABLE: Record<string, ModelPricing> = {
   'deepseek-chat': {
     hit: 0.014,
@@ -19,7 +23,6 @@ export const PRICING_TABLE: Record<string, ModelPricing> = {
 }
 
 export function getPricing(model: string): ModelPricing {
-  // 简单前缀匹配，兼容带后缀的模型名
   const key = Object.keys(PRICING_TABLE).find(k => model.startsWith(k))
   return PRICING_TABLE[key ?? 'deepseek-chat']!
 }
@@ -42,7 +45,6 @@ export function calculateCost(
 ): CostBreakdown {
   const p = getPricing(model)
   
-  // token 数转为百万单位
   const h = hitTokens / 1_000_000
   const m = missTokens / 1_000_000
   const o = outputTokens / 1_000_000
@@ -52,8 +54,6 @@ export function calculateCost(
   const outputCost = o * p.output
 
   const total = hitCost + missCost + outputCost
-  
-  // 缓存省下的钱：假设这些命中缓存如果没有命中，需要按未命中价格支付
   const savedByCache = h * (p.miss - p.hit)
 
   return {

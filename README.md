@@ -1,6 +1,13 @@
 dsh-token-optima
 ================
 
+> **隐私与安全声明**
+> - **无网络请求**：本插件不主动向任何外部服务器发送数据。所有计算与统计完全在本地完成。
+> - **无遥测**：不包含任何埋点或遥测代码。
+> - **数据最小化**：不存储 prompt 原文、reasoning 原文或工具结果原文，仅在内存中保留哈希用于对比。
+> - **调试隔离**：全局调试对象 `window.__tokenOptimaDebug` 默认关闭，需显式修改配置开启。
+> - **文件写入**：仅在 `~/.dsh/token-optima/` 目录下写入接口健康诊断文件，且失败时不阻塞主流程。
+
 DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框架上，
 通过 64 token 块级缓存模型 + 14 类归因，让你看清每一轮请求的 token
 去向、缓存命中情况、以及**真实花费**。
@@ -64,23 +71,6 @@ DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框�
     pnpm typecheck   # 类型检查
     pnpm build       # 生成 lib/index.mjs 和 lib/client.js
     pnpm test        # 运行 Vitest 测试
-
-架构
-----
-
-    src/
-    ├── index.ts                host 入口
-    ├── config.ts               配置 schema
-    ├── core/                   核心算法，零 DSH 依赖
-    │   ├── pricing.ts          费率表与费用核算
-    │   ├── cache-model.ts      64 token 块建模
-    │   └── ...                 (其余算法)
-    ├── host/
-    │   ├── session-fold.ts     事件重放 + 状态 + 查询 + 费用聚合
-    │   └── ...                 
-    └── client/
-        ├── Panel.tsx           主面板（含费用 ROI 与失效归因）
-        └── ...                 
 
 License
 -------

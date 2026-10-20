@@ -1,10 +1,32 @@
 {
   "name": "dsh-token-optima",
   "description": "Deep context analysis for DeepSeek Harness: 64-token cache-block modeling, cache invalidation events, reasoning lifecycle, fine-grained source attribution.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "type": "module",
   "main": "lib/index.mjs",
   "types": "lib/types/index.d.ts",
+  "author": "Your Name <your.email@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/dsh-token-optima"
+  },
+  "homepage": "https://github.com/yourname/dsh-token-optima#readme",
+  "bugs": {
+    "url": "https://github.com/yourname/dsh-token-optima/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek",
+    "token",
+    "cache",
+    "harness",
+    "llm",
+    "cost-tracker"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "exports": {
     ".": {
       "types": "./lib/types/index.d.ts",
@@ -21,14 +43,17 @@
     "lib/index.mjs",
     "lib/client.js",
     "cordis.patch.yml",
-    "lib/types/**/*.d.ts"
+    "lib/types/**/*.d.ts",
+    "!**/*.tsbuildinfo",
+    "!**/*.log",
+    "!**/.DS_Store"
   ],
-  "license": "MIT",
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "demo": "tsx examples/demo.ts"
+    "demo": "tsx examples/demo.ts",
+    "prepublishOnly": "pnpm build && pnpm test"
   },
   "dsh": {
     "client": {
@@ -42,12 +67,12 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-typert-protocol": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/cordis": "^4.0.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.2.0-rc.2",
+    "@deepseek-ai/schemastery": ">=3.0.0"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/cordis": "^4.0.0",
     "@deepseek-ai/dsh-typert-protocol": "0.2.0-rc.2",
     "@types/node": "^22.10.0",
     "@types/react": "^19.0.0",
@@ -58,7 +83,7 @@
     "tsdown": "^0.23.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0",
+    "vitest": "^2.1.9",
     "zod": "^4.4.3"
   }
 }

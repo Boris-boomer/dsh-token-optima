@@ -10,7 +10,10 @@ import { HealthProbe } from './host/health-probe.js'
 import { registerTools } from './host/tools.js'
 import { installEffortPolicy } from './host/effort-policy.js'
 
+// 唯一标识，用于诊断信息
 export const name = 'dsh-token-optima'
+// 显式声明依赖，告知 Cordis 等待 tools 就绪后再执行 apply
+export const inject = ['tools']
 
 export { Config, NS } from './config.js'
 export type { Config as TokenOptimaConfig } from './config.js'
@@ -279,5 +282,3 @@ export function apply(ctx: Context, config: ConfigType): void {
     fold.dispose()
   })
 }
-
-export default { name, apply, Config }

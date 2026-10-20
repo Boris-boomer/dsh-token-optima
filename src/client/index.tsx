@@ -36,11 +36,13 @@ const Root: FC<RootProps> = ({ ctx }) => {
   const [open, setOpen] = useState(false)
   const [hostSessionId, setHostSessionId] = useState('')
   const [fetchSessionId, setFetchSessionId] = useState('')
+  const [manualSessionId, setManualSessionId] = useState('') // 新增：手动选择的历史会话
   const [titles, setTitles] = useState<Record<string, string>>({})
   const [dark, setDark] = useState<boolean>(() => detectDark())
   const [font, setFont] = useState<InheritedFont>(() => readInheritedFont())
 
-  const activeSessionId = hostSessionId || fetchSessionId
+  // 优先级：手动选择 > 宿主当前会话 > fetch 兜底
+  const activeSessionId = manualSessionId || hostSessionId || fetchSessionId
 
   /* ---------- 主题 + 字体跟随 ---------- */
   useEffect(() => {
@@ -86,7 +88,15 @@ const Root: FC<RootProps> = ({ ctx }) => {
         const v = (r?.value ?? r) as { currentSessionId?: string } | null
         if (cancelled) return
         const id = v?.currentSessionId ?? ''
-        if (id) setHostSessionId((prev) => (prev === id ? prev : id))
+        if (id) {
+          setHostSessionId((prev) => {
+            // 如果宿主当前会话变了（比如发了新消息），清空手动选择，自动切回最新
+            if (prev !== id && prev !== '') {
+              setManualSessionId('')
+            }
+            return id
+          })
+        }
       } catch {
         // ignore
       }
@@ -258,6 +268,13 @@ const Root: FC<RootProps> = ({ ctx }) => {
       dark={dark}
       font={font}
       onClose={() => setOpen(false)}
+      onSessionChange={(id) => {
+        if (id === hostSessionId) {
+          setManualSessionId('') // 如果选的正好是当前活跃会话，取消手动锁定
+        } else {
+          setManualSessionId(id)
+        }
+      }}
     />
   )
 }

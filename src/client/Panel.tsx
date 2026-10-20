@@ -17,6 +17,7 @@ interface Props {
   dark: boolean
   font: InheritedFont
   onClose: () => void
+  onSessionChange: (id: string) => void // 新增：支持切换会话
 }
 
 interface EffortDecision {
@@ -34,6 +35,7 @@ interface CacheRisk {
   prevLen: number
   nextLen: number
   detail: string
+  changedSources?: string[]
 }
 
 interface HealthReport {
@@ -45,11 +47,6 @@ interface HealthReport {
 interface CostBreakdown {
   total: number
   savedByCache: number
-  details: {
-    hitCost: number
-    missCost: number
-    outputCost: number
-  }
 }
 
 interface Report {
@@ -67,9 +64,12 @@ interface Report {
   } | null
   history: Array<{
     turnId: string
+    timestamp: number
+    model: string
     categories: Record<number, { value: number }>
     cacheBlocks: { hitBlocks: number; missBlocks: number; writeCandidateBlocks: number }
     cacheEvents: Array<{ kind: string }>
+    cost?: CostBreakdown
   }>
   budget: {
     usage: { session: number; daily: number; monthly: number }
@@ -81,6 +81,16 @@ interface Report {
   foldFailures: number
   debug: boolean
   health: HealthReport
+}
+
+interface SessionSummary {
+  sessionId: string
+  turns: number
+  lastTs: number
+  model: string
+  totalTokens: number
+  totalCost: number
+  totalSaved: number
 }
 
 function getService(ctx: any): any {
@@ -129,10 +139,11 @@ function downloadBlob(filename: string, content: string, mime: string): void {
   }
 }
 
-export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose }) => {
+export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, onSessionChange }) => {
   const [report, setReport] = useState<Report | null>(null)
   const [composition, setComposition] = useState<CompositionEntry[]>([])
   const [groups, setGroups] = useState<GroupEntry[]>([])
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [ready, setReady] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -191,6 +202,15 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
       if (!svc) {
         if (!cancelled) setReady(false)
         return
+      }
+
+      try {
+        const sessList = await svc.listSessions()
+        if (!cancelled) {
+          setSessions((sessList?.value ?? sessList) as SessionSummary[])
+        }
+      } catch {
+        // ignore
       }
 
       if (!sessionId) {
@@ -257,7 +277,20 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
     }
   }
 
-  const trend: TrendEntry[] = (report?.history ?? []).slice(-30).map((t) => {
+  const historyList = report?.history ?? []
+  const totalCostAllTime = historyList.reduce((sum, t) => sum + (t.cost?.total ?? 0), 0)
+  const totalSavedAllTime = historyList.reduce((sum, t) => sum + (t.cost?.savedByCache ?? 0), 0)
+  
+  let totalHit = 0
+  let totalMiss = 0
+  for (const t of historyList) {
+    totalHit += t.cacheBlocks.hitBlocks
+    totalMiss += (t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks)
+  }
+  const totalBlocks = totalHit + totalMiss
+  const cacheHitRate = totalBlocks > 0 ? (totalHit / totalBlocks) * 100 : 0
+
+  const trend: TrendEntry[] = historyList.slice(-30).map((t) => {
     const groupsRecord: Record<string, number> = {}
     const groupIds: Record<string, number[]> = {
       input: [1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -329,11 +362,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
 
   const merged = { ...panelStyle(dark, font), ...positionStyle }
 
-  const latestEffort =
-    report?.effort && report.effort.length > 0
-      ? report.effort[report.effort.length - 1]
-      : null
-
+  const latestEffort = report?.effort && report.effort.length > 0 ? report.effort[report.effort.length - 1] : null
   const risks = (report?.cacheRisks ?? []).slice(-5).reverse()
 
   const formatTime = (ts: number): string => {
@@ -346,8 +375,6 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
   }
 
   const shortId = sessionId ? sessionId.slice(-8) : '—'
-
-  /* ---------- 数据可信度 + 接口健康 ---------- */
   const drift = report?.latest?.alignmentDrift ?? 0
   const unattributed = report?.latest?.unattributed?.value ?? 0
   const foldFailures = report?.foldFailures ?? 0
@@ -356,34 +383,12 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
   const issues: Array<{ level: 'warn' | 'error'; text: string }> = []
 
   if (health && !health.ok) {
-    for (const f of health.failures) {
-      issues.push({
-        level: 'error',
-        text: `DSH 接口变更：${f.item}（${f.detail}）`,
-      })
-    }
+    for (const f of health.failures) issues.push({ level: 'error', text: `DSH 接口变更：${f.item}（${f.detail}）` })
   }
+  if (drift > 0.03) issues.push({ level: 'warn', text: `估算偏差 ${(drift * 100).toFixed(1)}% — 1-9 类为客户端估算，非精确值` })
+  if (unattributed > 0) issues.push({ level: 'warn', text: `未归因 ${Math.round(unattributed)} tokens — 无法映射到任何来源` })
+  if (foldFailures > 0) issues.push({ level: 'error', text: `${foldFailures} 个事件解析失败，数据可能不完整` })
 
-  if (drift > 0.03) {
-    issues.push({
-      level: 'warn',
-      text: `估算偏差 ${(drift * 100).toFixed(1)}% — 1-9 类为客户端估算，非精确值`,
-    })
-  }
-  if (unattributed > 0) {
-    issues.push({
-      level: 'warn',
-      text: `未归因 ${Math.round(unattributed)} tokens — 无法映射到任何来源`,
-    })
-  }
-  if (foldFailures > 0) {
-    issues.push({
-      level: 'error',
-      text: `${foldFailures} 个事件解析失败，数据可能不完整`,
-    })
-  }
-
-  // 费用展示辅助
   const cost = report?.latest?.cost
   const formatCurrency = (val: number) => `$${val.toFixed(5)}`
 
@@ -409,13 +414,40 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
               color: colors.muted,
               fontSize: '0.85em',
               marginTop: '0.15em',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4em'
             }}
-            title={sessionId}
           >
-            {title || '（无标题）'} · {shortId}
+            {/* 新增：会话下拉选择器 */}
+            <select
+              value={sessionId}
+              onChange={(e) => onSessionChange(e.target.value)}
+              onMouseDown={(e) => e.stopPropagation()}
+              style={{
+                background: dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
+                color: dark ? colors.text : colors.textLight,
+                border: 'none',
+                borderRadius: 4,
+                padding: '2px 4px',
+                fontSize: '0.95em',
+                maxWidth: '160px',
+                outline: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              {sessions.map(s => (
+                <option key={s.sessionId} value={s.sessionId}>
+                  {s.sessionId.slice(-8)} ({s.turns}轮)
+                </option>
+              ))}
+              {!sessions.some(s => s.sessionId === sessionId) && sessionId && (
+                <option value={sessionId}>{shortId} (当前)</option>
+              )}
+            </select>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={title}>
+              {title || '（无标题）'}
+            </span>
           </div>
         </div>
         <div
@@ -429,8 +461,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             style={{
               ...iconBtnStyle,
               opacity: !sessionId || exporting || !report?.latest ? 0.4 : 1,
-              cursor:
-                !sessionId || exporting || !report?.latest ? 'not-allowed' : 'pointer',
+              cursor: !sessionId || exporting || !report?.latest ? 'not-allowed' : 'pointer',
             }}
             title="导出 CSV"
           >
@@ -454,29 +485,10 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
         </div>
       </div>
 
-      {!sessionId && (
-        <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>
-          等待会话激活...
-        </div>
-      )}
-
-      {sessionId && !ready && (
-        <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>
-          加载中...
-        </div>
-      )}
-
-      {ready && error && (
-        <div style={{ marginTop: '0.8em', color: '#E94B3C', fontSize: '0.92em' }}>
-          {error}
-        </div>
-      )}
-
-      {ready && !error && !report?.latest && issues.length === 0 && (
-        <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>
-          等待首次对话...
-        </div>
-      )}
+      {!sessionId && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>等待会话激活...</div>}
+      {sessionId && !ready && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>加载中...</div>}
+      {ready && error && <div style={{ marginTop: '0.8em', color: '#E94B3C', fontSize: '0.92em' }}>{error}</div>}
+      {ready && !error && !report?.latest && issues.length === 0 && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>等待首次对话...</div>}
 
       {ready && !error && issues.length > 0 && (
         <div
@@ -489,14 +501,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
           }}
         >
           {issues.map((it, i) => (
-            <div
-              key={i}
-              style={{
-                fontSize: '0.88em',
-                lineHeight: 1.55,
-                color: it.level === 'error' ? '#E94B3C' : '#C77A00',
-              }}
-            >
+            <div key={i} style={{ fontSize: '0.88em', lineHeight: 1.55, color: it.level === 'error' ? '#E94B3C' : '#C77A00' }}>
               ⚠ {it.text}
             </div>
           ))}
@@ -509,35 +514,29 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             <Composition groups={groups} composition={composition} dark={dark} />
           </div>
 
-          {/* 新增：费用与缓存 ROI 面板 */}
           {cost && (
             <div
               style={{
                 marginTop: '1.2em',
-                padding: '0.8em',
                 borderRadius: 8,
                 background: dark ? 'rgba(80, 200, 120, 0.08)' : 'rgba(80, 200, 120, 0.12)',
                 border: `1px solid ${dark ? 'rgba(80, 200, 120, 0.25)' : 'rgba(80, 200, 120, 0.3)'}`,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
+                overflow: 'hidden',
               }}
             >
-              <div>
-                <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>
-                  缓存为你省下
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8em' }}>
+                <div>
+                  <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>本轮缓存为你省下</div>
+                  <div style={{ fontSize: '1.2em', fontWeight: 700, color: colors.cache }}>{formatCurrency(cost.savedByCache)}</div>
                 </div>
-                <div style={{ fontSize: '1.2em', fontWeight: 700, color: colors.cache }}>
-                  {formatCurrency(cost.savedByCache)}
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>本轮总花费</div>
+                  <div style={{ fontSize: '1.2em', fontWeight: 700, color: dark ? colors.text : colors.textLight }}>{formatCurrency(cost.total)}</div>
                 </div>
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>
-                  本轮总花费
-                </div>
-                <div style={{ fontSize: '1.2em', fontWeight: 700, color: dark ? colors.text : colors.textLight }}>
-                  {formatCurrency(cost.total)}
-                </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5em 0.8em', background: dark ? 'rgba(80, 200, 120, 0.1)' : 'rgba(80, 200, 120, 0.15)', borderTop: `1px dashed ${dark ? 'rgba(80, 200, 120, 0.3)' : 'rgba(80, 200, 120, 0.4)'}`, fontSize: '0.85em' }}>
+                <span style={{ color: colors.cache, fontWeight: 600 }}>会话累计省下 {formatCurrency(totalSavedAllTime)}</span>
+                <span style={{ color: colors.muted }}>累计花费 {formatCurrency(totalCostAllTime)} | 平均命中率 {cacheHitRate.toFixed(1)}%</span>
               </div>
             </div>
           )}
@@ -546,117 +545,52 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             <div style={sectionTitleStyle}>推理强度</div>
             {latestEffort ? (
               latestEffort.decided === 'unsupported' ? (
-                <div
-                  style={{
-                    color: colors.muted,
-                    fontSize: '0.92em',
-                  }}
-                >
-                  {latestEffort.reason}
-                </div>
+                <div style={{ color: colors.muted, fontSize: '0.92em' }}>{latestEffort.reason}</div>
               ) : (
                 <div style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.92em' }}>
                   <span style={{ fontWeight: 600 }}>{latestEffort.decided}</span>
                   {latestEffort.previous !== latestEffort.decided && (
-                    <span style={{ color: colors.muted, marginLeft: '0.6em' }}>
-                      （{latestEffort.previous} → {latestEffort.decided}）
-                    </span>
+                    <span style={{ color: colors.muted, marginLeft: '0.6em' }}>（{latestEffort.previous} → {latestEffort.decided}）</span>
                   )}
-                  <div
-                    style={{
-                      color: colors.muted,
-                      fontSize: '0.85em',
-                      marginTop: '0.2em',
-                    }}
-                  >
-                    {latestEffort.reason}
-                  </div>
+                  <div style={{ color: colors.muted, fontSize: '0.85em', marginTop: '0.2em' }}>{latestEffort.reason}</div>
                 </div>
               )
-            ) : (
-              <div style={{ color: colors.muted, fontSize: '0.92em' }}>
-                等待下次请求...
-              </div>
-            )}
+            ) : <div style={{ color: colors.muted, fontSize: '0.92em' }}>等待下次请求...</div>}
           </div>
 
           <div style={sectionStyle}>
             <div style={sectionTitleStyle}>缓存块</div>
             <div style={statRowStyle}>
-              <span>
-                <span style={statLabelStyle}>命中</span>
-                <span style={statValueStyle}>{report.latest.cacheBlocks.hitBlocks}</span>
-              </span>
-              <span>
-                <span style={statLabelStyle}>未命中</span>
-                <span style={statValueStyle}>{report.latest.cacheBlocks.missBlocks}</span>
-              </span>
-              <span>
-                <span style={statLabelStyle}>写入候选</span>
-                <span style={statValueStyle}>
-                  {report.latest.cacheBlocks.writeCandidateBlocks}
-                </span>
-              </span>
+              <span><span style={statLabelStyle}>命中</span><span style={statValueStyle}>{report.latest.cacheBlocks.hitBlocks}</span></span>
+              <span><span style={statLabelStyle}>未命中</span><span style={statValueStyle}>{report.latest.cacheBlocks.missBlocks}</span></span>
+              <span><span style={statLabelStyle}>写入候选</span><span style={statValueStyle}>{report.latest.cacheBlocks.writeCandidateBlocks}</span></span>
             </div>
           </div>
 
           <div style={sectionStyle}>
             <div style={sectionTitleStyle}>推理 Token</div>
             <div style={statRowStyle}>
-              <span>
-                <span style={statLabelStyle}>本轮新产生</span>
-                <span style={statValueStyle}>{report.latest.reasoning.producedThisTurn}</span>
-              </span>
-              <span>
-                <span style={statLabelStyle}>历史回传</span>
-                <span style={statValueStyle}>{report.latest.reasoning.replayedInInput}</span>
-              </span>
+              <span><span style={statLabelStyle}>本轮新产生</span><span style={statValueStyle}>{report.latest.reasoning.producedThisTurn}</span></span>
+              <span><span style={statLabelStyle}>历史回传</span><span style={statValueStyle}>{report.latest.reasoning.replayedInInput}</span></span>
             </div>
           </div>
 
           <div style={sectionStyle}>
             <div style={sectionTitleStyle}>缓存风险</div>
             {risks.length === 0 ? (
-              <div style={{ color: colors.muted, fontSize: '0.92em' }}>
-                无（缓存前缀未被破坏）
-              </div>
+              <div style={{ color: colors.muted, fontSize: '0.92em' }}>无（缓存前缀未被破坏）</div>
             ) : (
               risks.map((r, i) => (
-                <div
-                  key={i}
-                  style={{
-                    fontSize: '0.9em',
-                    padding: '0.25em 0',
-                    borderBottom:
-                      i < risks.length - 1
-                        ? `1px dashed ${dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}`
-                        : 'none',
-                  }}
-                >
+                <div key={i} style={{ fontSize: '0.9em', padding: '0.4em 0', borderBottom: i < risks.length - 1 ? `1px dashed ${dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}` : 'none' }}>
                   <div>
-                    <span style={{ color: '#E94B3C', marginRight: '0.4em' }}>
-                      {r.kind === 'compaction' ? '⚡' : r.kind === 'shrink' ? '↓' : '↔'}
-                    </span>
+                    <span style={{ color: '#E94B3C', marginRight: '0.4em' }}>{r.kind === 'compaction' ? '⚡' : r.kind === 'shrink' ? '↓' : '↔'}</span>
                     <span style={{ fontWeight: 600 }}>{r.kind}</span>
-                    <span
-                      style={{
-                        color: colors.muted,
-                        marginLeft: '0.6em',
-                        fontSize: '0.85em',
-                      }}
-                    >
-                      {formatTime(r.at)}
-                    </span>
+                    <span style={{ color: colors.muted, marginLeft: '0.6em', fontSize: '0.85em' }}>{formatTime(r.at)}</span>
                   </div>
-                  <div
-                    style={{
-                      color: colors.muted,
-                      fontSize: '0.85em',
-                      paddingLeft: '1.2em',
-                    }}
-                  >
-                    {r.detail}
-                  </div>
+                  <div style={{ color: colors.muted, fontSize: '0.85em', paddingLeft: '1.2em', marginTop: '0.2em' }}>{r.detail}</div>
+                  {r.changedSources && r.changedSources.length > 0 && (
+                    <div style={{ color: '#C77A00', fontSize: '0.82em', paddingLeft: '1.2em', marginTop: '0.2em', fontWeight: 500 }}>⚠ 涉及来源：{r.changedSources.join(', ')}</div>
+                  )}
                 </div>
               ))
             )}
@@ -666,9 +600,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             <div style={sectionStyle}>
               <div style={sectionTitleStyle}>本轮缓存事件</div>
               {report.latest.cacheEvents.map((e, i) => (
-                <div key={i} style={{ fontSize: '0.9em', padding: '0.15em 0' }}>
-                  ⚡ {e.kind} @ block {e.atChunkIndex}
-                </div>
+                <div key={i} style={{ fontSize: '0.9em', padding: '0.15em 0' }}>⚡ {e.kind} @ block {e.atChunkIndex}</div>
               ))}
             </div>
           )}
@@ -678,34 +610,48 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
             <Trend entries={trend} dark={dark} />
           </div>
 
+          {/* 新增：同会话历史明细 */}
+          <div style={sectionStyle}>
+            <details>
+              <summary style={{ cursor: 'pointer', color: colors.muted, fontSize: '0.92em', userSelect: 'none' }}>
+                历史轮次明细（共 {historyList.length} 轮）
+              </summary>
+              <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: '0.8em' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85em' }}>
+                  <thead>
+                    <tr style={{ color: colors.muted, textAlign: 'left', borderBottom: `1px solid ${dark ? colors.border : colors.borderLight}` }}>
+                      <th style={{ padding: '0.4em 0' }}>轮次</th>
+                      <th>花费</th>
+                      <th>省下</th>
+                      <th>命中/未中</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...historyList].reverse().map((t, idx) => (
+                      <tr key={t.turnId} style={{ borderBottom: `1px dashed ${dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'}` }}>
+                        <td style={{ padding: '0.4em 0' }}>#{historyList.length - idx}</td>
+                        <td style={{ color: dark ? colors.text : colors.textLight }}>${(t.cost?.total ?? 0).toFixed(5)}</td>
+                        <td style={{ color: colors.cache }}>${(t.cost?.savedByCache ?? 0).toFixed(5)}</td>
+                        <td style={{ color: colors.muted }}>{t.cacheBlocks.hitBlocks} / {t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+
           <div style={sectionStyle}>
             <div style={sectionTitleStyle}>预算（tokens）</div>
-            <div
-              style={{
-                fontVariantNumeric: 'tabular-nums',
-                fontSize: '0.92em',
-                lineHeight: 1.9,
-              }}
-            >
-              <div>
-                <span style={statLabelStyle}>会话</span>
-                {report.budget.usage.session} / {report.budget.limits.session || '∞'}
-              </div>
-              <div>
-                <span style={statLabelStyle}>日</span>
-                {report.budget.usage.daily} / {report.budget.limits.daily || '∞'}
-              </div>
-              <div>
-                <span style={statLabelStyle}>月</span>
-                {report.budget.usage.monthly} / {report.budget.limits.monthly || '∞'}
-              </div>
+            <div style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.92em', lineHeight: 1.9 }}>
+              <div><span style={statLabelStyle}>会话</span>{report.budget.usage.session} / {report.budget.limits.session || '∞'}</div>
+              <div><span style={statLabelStyle}>日</span>{report.budget.usage.daily} / {report.budget.limits.daily || '∞'}</div>
+              <div><span style={statLabelStyle}>月</span>{report.budget.usage.monthly} / {report.budget.limits.monthly || '∞'}</div>
             </div>
           </div>
 
           <div style={sectionStyle}>
-            <div style={{ color: colors.muted, fontSize: '0.85em' }}>
-              tokenizer: {report.tokenizer.id} ({report.tokenizer.precision})
-            </div>
+            <div style={{ color: colors.muted, fontSize: '0.85em' }}>tokenizer: {report.tokenizer.id} ({report.tokenizer.precision})</div>
           </div>
         </>
       )}

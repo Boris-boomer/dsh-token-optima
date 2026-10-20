@@ -4,7 +4,7 @@ import { attributeTurn } from '../core/attribution.js'
 import { EstimatedTokenizer, type TokenizerAdapter } from '../core/tokenizer.js'
 import { ReasoningTracker } from '../core/reasoning.js'
 import { CATEGORIES, CATEGORY_GROUPS } from '../core/categories.js'
-import { calculateCost } from '../core/pricing.js' // 新增：引入费用核算
+import { calculateCost } from '../core/pricing.js'
 import { toCsv } from './store-csv.js'
 import type {
   AssignableSource,
@@ -41,6 +41,7 @@ interface InternalState {
   surfaceSignature: string | null
   surfaceLength: number
   toolCallCount: number
+  prevSources: AssignableSource[]
 }
 
 export interface CacheRisk {
@@ -50,6 +51,17 @@ export interface CacheRisk {
   prevLen: number
   nextLen: number
   detail: string
+  changedSources?: string[]
+}
+
+export interface SessionSummary {
+  sessionId: string
+  turns: number
+  lastTs: number
+  model: string
+  totalTokens: number
+  totalCost: number
+  totalSaved: number
 }
 
 export class SessionFold {
@@ -74,7 +86,6 @@ export class SessionFold {
   }> = []
 
   private cacheRisks: CacheRisk[] = []
-
   private currentSessionId = ''
 
   constructor(
@@ -93,8 +104,6 @@ export class SessionFold {
     this.maxTurns = 200
   }
 
-  /* ---------------- 诊断 ---------------- */
-
   noteEvent(line: string): void {
     this.observedEventCount++
     this.recentEventTypes.push(line)
@@ -103,23 +112,10 @@ export class SessionFold {
     }
   }
 
-  getObservedEventCount(): number {
-    return this.observedEventCount
-  }
-
-  getRecentEventTypes(): string[] {
-    return [...this.recentEventTypes]
-  }
-
-  getFoldFailures(): number {
-    return this.foldFailures
-  }
-
-  /* ---------------- 对外查询 ---------------- */
-
-  getBudgetTracker(): BudgetTracker {
-    return this.budget
-  }
+  getObservedEventCount(): number { return this.observedEventCount }
+  getRecentEventTypes(): string[] { return [...this.recentEventTypes] }
+  getFoldFailures(): number { return this.foldFailures }
+  getBudgetTracker(): BudgetTracker { return this.budget }
 
   getCacheRisks(sessionId?: string): CacheRisk[] {
     if (sessionId) {
@@ -128,28 +124,15 @@ export class SessionFold {
     return this.cacheRisks.slice(-20)
   }
 
-  recordEffortDecision(d: {
-    sessionId: string
-    previous: string
-    decided: string
-    reason: string
-  }): void {
+  recordEffortDecision(d: { sessionId: string; previous: string; decided: string; reason: string }): void {
     this.effortDecisions.push({ ...d, at: Date.now() })
     if (this.effortDecisions.length > 100) {
       this.effortDecisions.splice(0, this.effortDecisions.length - 100)
     }
   }
 
-  getEffortDecisions(sessionId?: string): Array<{
-    sessionId: string
-    previous: string
-    decided: string
-    reason: string
-    at: number
-  }> {
-    if (sessionId) {
-      return this.effortDecisions.filter((e) => e.sessionId === sessionId).slice(-20)
-    }
+  getEffortDecisions(sessionId?: string) {
+    if (sessionId) return this.effortDecisions.filter((e) => e.sessionId === sessionId).slice(-20)
     return this.effortDecisions.slice(-20)
   }
 
@@ -157,9 +140,7 @@ export class SessionFold {
     if (sessionId) this.currentSessionId = sessionId
   }
 
-  getCurrentSession(): string {
-    return this.currentSessionId
-  }
+  getCurrentSession(): string { return this.currentSessionId }
 
   getToolCallCount(sessionId: string): number {
     const state = this.byId.get(sessionId)
@@ -172,8 +153,6 @@ export class SessionFold {
     return surfaceCount
   }
 
-  /* ---------------- observe ---------------- */
-
   observe(session: unknown): void {
     if (!session || typeof session !== 'object') return
     const s = session as Record<string, unknown>
@@ -184,24 +163,19 @@ export class SessionFold {
 
     const seq = typeof s['seq'] === 'number' ? (s['seq'] as number) : 0
     const eventAt = s['eventAt']
-
     const state = this.stateOf(s as object)
 
     if (!this.loggedShapes.has(session)) {
       this.loggedShapes.add(session)
-      this.noteEvent(
-        `OBSERVE: id=${state.sessionId} seq=${seq} hasEventAt=${typeof eventAt === 'function'}`,
-      )
+      this.noteEvent(`OBSERVE: id=${state.sessionId} seq=${seq} hasEventAt=${typeof eventAt === 'function'}`)
     }
 
     if (typeof eventAt !== 'function') return
     if (seq <= state.consumed) return
 
     let failures = 0
-
     while (state.consumed < seq) {
       const cursor = state.consumed
-
       let event: unknown
       try {
         event = (eventAt as (n: number) => unknown).call(s, cursor)
@@ -220,14 +194,11 @@ export class SessionFold {
           this.foldFailures++
         }
       }
-
       state.consumed = cursor + 1
     }
 
     if (state.turns.length > 0) {
-      this.noteEvent(
-        `OBSERVE: done id=${state.sessionId} turns=${state.turns.length} failures=${failures}`,
-      )
+      this.noteEvent(`OBSERVE: done id=${state.sessionId} turns=${state.turns.length} failures=${failures}`)
     }
   }
 
@@ -253,6 +224,7 @@ export class SessionFold {
       surfaceSignature: null,
       surfaceLength: 0,
       toolCallCount: 0,
+      prevSources: [],
     }
     this.byWeak.set(session, s)
     this.byId.set(id, s)
@@ -264,8 +236,6 @@ export class SessionFold {
     return String(s['id'] ?? s['sessionId'] ?? s['key'] ?? 'unknown')
   }
 
-  /* ---------------- 事件折叠 ---------------- */
-
   private foldEvent(state: InternalState, event: Record<string, unknown>): void {
     const type = typeof event['type'] === 'string' ? (event['type'] as string) : ''
     const data = (event['data'] ?? {}) as Record<string, unknown>
@@ -274,11 +244,9 @@ export class SessionFold {
       case 'request/header':
         state.header = data['header'] ?? null
         return
-
       case 'tool/call':
         state.toolCallCount++
         return
-
       case 'system/message':
       case 'user/message':
       case 'assistant/message':
@@ -291,7 +259,6 @@ export class SessionFold {
         if (type === 'assistant/message') this.settleTurn(state, event)
         return
       }
-
       case 'compaction/summary':
       case 'compaction/prune': {
         const prevLen = state.surface.length
@@ -304,9 +271,9 @@ export class SessionFold {
           detail: type === 'compaction/summary' ? '上下文被摘要替换' : '上下文被裁剪',
         })
         state.chunks = null
+        state.prevSources = []
         return
       }
-
       case 'llm/retry-started': {
         const turn = data['turn']
         const step = data['step']
@@ -317,7 +284,6 @@ export class SessionFold {
         }
         return
       }
-
       default:
         return
     }
@@ -327,10 +293,12 @@ export class SessionFold {
     const seqs = state.surface.map((n) => n.seq)
     const nextSig = signatureOf(seqs)
     const nextLen = seqs.length
+    const currentSources = state.surface.map((n) => n.source)
 
     if (state.surfaceSignature === null) {
       state.surfaceSignature = nextSig
       state.surfaceLength = nextLen
+      state.prevSources = currentSources
       return
     }
 
@@ -340,10 +308,19 @@ export class SessionFold {
     state.surfaceSignature = nextSig
     state.surfaceLength = nextLen
 
-    if (nextLen > prevLen) return
+    if (nextLen > prevLen) {
+      state.prevSources = currentSources
+      return
+    }
+
+    const changedSet = new Set<string>()
 
     if (nextLen < prevLen) {
-      if (prevLen - nextLen >= 2) {
+      const diff = prevLen - nextLen
+      if (diff >= 2) {
+        const removedSources = state.prevSources.slice(nextLen, prevLen)
+        removedSources.forEach((s) => changedSet.add(s))
+        
         this.recordCacheRisk({
           sessionId: state.sessionId,
           kind: 'shrink',
@@ -351,9 +328,26 @@ export class SessionFold {
           prevLen,
           nextLen,
           detail: `surface 从 ${prevLen} 条缩短到 ${nextLen} 条，下一轮缓存将部分失效`,
+          changedSources: Array.from(changedSet),
         })
       }
+      state.prevSources = currentSources
       return
+    }
+
+    let firstDiffIdx = -1
+    for (let i = 0; i < nextLen; i++) {
+      if (state.prevSources[i] !== currentSources[i]) {
+        firstDiffIdx = i
+        break
+      }
+    }
+
+    if (firstDiffIdx !== -1) {
+      changedSet.add(currentSources[firstDiffIdx] ?? 'unknown')
+      for (let i = firstDiffIdx; i < nextLen; i++) {
+        changedSet.add(currentSources[i] ?? 'unknown')
+      }
     }
 
     this.recordCacheRisk({
@@ -363,7 +357,10 @@ export class SessionFold {
       prevLen,
       nextLen,
       detail: 'surface 中间被替换，从其位置起的缓存前缀失效',
+      changedSources: Array.from(changedSet),
     })
+    
+    state.prevSources = currentSources
   }
 
   private recordCacheRisk(r: CacheRisk): void {
@@ -394,13 +391,10 @@ export class SessionFold {
 
     const text = extractText(event)
     const source = classifySource(type, text)
-    const isReasoning =
-      type === 'assistant/message' && extractReasoningText(event).length > 0
+    const isReasoning = type === 'assistant/message' && extractReasoningText(event).length > 0
     const tokens = text ? this.tokenizer.count(text) : 0
     return { seq, source, text, isReasoning, tokens }
   }
-
-  /* ---------------- 单轮结算 ---------------- */
 
   private settleTurn(state: InternalState, event: Record<string, unknown>): void {
     const data = (event['data'] ?? {}) as Record<string, unknown>
@@ -408,19 +402,11 @@ export class SessionFold {
 
     const segments: SourceSegment[] = state.surface
       .filter((n) => !n.isReasoning)
-      .map((n) => ({
-        source: n.source,
-        text: n.text,
-        tokenCount: n.tokens,
-      }))
+      .map((n) => ({ source: n.source, text: n.text, tokenCount: n.tokens }))
 
     const reasoningText = extractReasoningText(event)
     if (reasoningText) {
-      segments.push({
-        source: 'assistant_msg',
-        text: reasoningText,
-        isReasoning: true,
-      })
+      segments.push({ source: 'assistant_msg', text: reasoningText, isReasoning: true })
     }
 
     const normalized = normalizeUsage(usage)
@@ -444,23 +430,16 @@ export class SessionFold {
         driftThreshold: this.config.driftThreshold,
         hashSalt: this.config.hashSalt,
         previousChunks: state.chunks,
-        contextChanged: {
-          systemPrompt: false,
-          toolsSchema: false,
-          model: false,
-        },
+        contextChanged: { systemPrompt: false, toolsSchema: false, model: false },
         hasTools,
         reasoningContent: reasoningText || null,
       },
     )
 
-    // --- 新增：计算费用 ---
     const hitTokens = normalized.prompt_cache_hit_tokens ?? 0
     const missTokens = normalized.prompt_cache_miss_tokens ?? 0
     const outputTokens = normalized.completion_tokens ?? 0
-
     attribution.cost = calculateCost(model, hitTokens, missTokens, outputTokens)
-    // ----------------------
 
     state.turns.push(attribution)
     if (state.turns.length > this.maxTurns) {
@@ -468,12 +447,7 @@ export class SessionFold {
     }
     state.chunks = chunks
 
-    this.reasoning.record(
-      attribution.turnId,
-      reasoningText,
-      attribution.reasoning.producedThisTurn,
-      hasTools,
-    )
+    this.reasoning.record(attribution.turnId, reasoningText, attribution.reasoning.producedThisTurn, hasTools)
     state.lastReasoningHash = attribution.reasoning.contentHash
 
     const total = normalized.prompt_tokens + normalized.completion_tokens
@@ -492,29 +466,7 @@ export class SessionFold {
     return 'deepseek-chat'
   }
 
-  /* ---------------- 报告 ---------------- */
-
-  report(sessionId: string): {
-    sessionId: string
-    turns: number
-    latest: TurnAttribution | null
-    history: TurnAttribution[]
-    budget: ReturnType<BudgetTracker['getState']>
-    tokenizer: { id: string; precision: string }
-    effort: Array<{
-      sessionId: string
-      previous: string
-      decided: string
-      reason: string
-      at: number
-    }>
-    cacheRisks: CacheRisk[]
-    foldFailures: number
-    debug: boolean
-    health: HealthReport
-    currentSessionId: string
-    toolCallCount: number
-  } {
+  report(sessionId: string) {
     const state = this.byId.get(sessionId)
     const turns = state?.turns ?? []
     return {
@@ -534,31 +486,17 @@ export class SessionFold {
     }
   }
 
-  composition(sessionId: string): Array<{
-    id: number
-    key: string
-    label: string
-    group: string
-    value: number
-    precision: string
-  }> {
+  composition(sessionId: string) {
     const state = this.byId.get(sessionId)
     const latest = state?.turns[state.turns.length - 1]
     if (!latest) return []
     return CATEGORIES.map((c) => {
       const m = latest.categories[c.id]
-      return {
-        id: c.id,
-        key: c.key,
-        label: c.label,
-        group: c.group,
-        value: m?.value ?? 0,
-        precision: m?.precision ?? 'inferred',
-      }
+      return { id: c.id, key: c.key, label: c.label, group: c.group, value: m?.value ?? 0, precision: m?.precision ?? 'inferred' }
     })
   }
 
-  groups(sessionId: string): Array<{ group: string; label: string; value: number }> {
+  groups(sessionId: string) {
     const comp = this.composition(sessionId)
     return CATEGORY_GROUPS.map((g) => ({
       group: g.group,
@@ -567,16 +505,29 @@ export class SessionFold {
     }))
   }
 
-  listSessions(): Array<{ sessionId: string; turns: number; lastTs: number }> {
-    const out: Array<{ sessionId: string; turns: number; lastTs: number }> = []
+  // 新增：返回包含所有统计信息的会话列表
+  listSessions(): SessionSummary[] {
+    const out: SessionSummary[] = []
     for (const [id, state] of this.byId) {
-      const last = state.turns[state.turns.length - 1]
+      let totalCost = 0
+      let totalSaved = 0
+      let totalTokens = 0
+      for (const t of state.turns) {
+        totalCost += t.cost?.total ?? 0
+        totalSaved += t.cost?.savedByCache ?? 0
+        totalTokens += (t.usage.prompt_tokens ?? 0) + (t.usage.completion_tokens ?? 0)
+      }
       out.push({
         sessionId: id,
         turns: state.turns.length,
-        lastTs: last?.timestamp ?? 0,
+        lastTs: state.turns[state.turns.length - 1]?.timestamp ?? 0,
+        model: this.modelOf(state),
+        totalTokens,
+        totalCost,
+        totalSaved,
       })
     }
+    // 按最后活动时间倒序
     out.sort((a, b) => b.lastTs - a.lastTs)
     return out
   }
@@ -586,38 +537,16 @@ export class SessionFold {
     return toCsv(state?.turns ?? [])
   }
 
-  tokenizerInfo(): { id: string; precision: string } {
+  tokenizerInfo() {
     return { id: this.tokenizer.id, precision: this.tokenizer.precision }
   }
 
-  audit(
-    sessionId: string,
-    messageId: string,
-  ): {
-    sessionId: string
-    messageId: string
-    content: string | null
-    note: string
-  } {
+  audit(sessionId: string, messageId: string) {
     const state = this.byId.get(sessionId)
-    if (!state) {
-      return { sessionId, messageId, content: null, note: 'session not tracked' }
-    }
+    if (!state) return { sessionId, messageId, content: null, note: 'session not tracked' }
     const node = state.surface.find((n) => String(n.seq) === messageId)
-    if (!node) {
-      return {
-        sessionId,
-        messageId,
-        content: null,
-        note: 'message not found in current retained surface (may have been compacted)',
-      }
-    }
-    return {
-      sessionId,
-      messageId,
-      content: node.text,
-      note: `source=${node.source} tokens=${node.tokens}`,
-    }
+    if (!node) return { sessionId, messageId, content: null, note: 'message not found in current retained surface (may have been compacted)' }
+    return { sessionId, messageId, content: node.text, note: `source=${node.source} tokens=${node.tokens}` }
   }
 
   dispose(): void {

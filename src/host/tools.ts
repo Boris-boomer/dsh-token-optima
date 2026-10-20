@@ -2,21 +2,26 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionFold } from './session-fold.js'
 
 interface ToolRegistry {
-  register?: (def: {
-    name: string
-    description: string
-    parameters: Record<string, unknown>
-    handler: (args: Record<string, unknown>) => Promise<unknown> | unknown
-  }) => void
+  register?: (def: Record<string, unknown>) => void
 }
 
 export function registerTools(ctx: Context, fold: SessionFold): void {
-  const tools = (ctx as unknown as { tools?: ToolRegistry }).tools
+  let tools: ToolRegistry | undefined
+  try {
+    const getFn = (ctx as any)?.get
+    if (typeof getFn === 'function') {
+      tools = getFn.call(ctx, 'tools', false) as ToolRegistry | undefined
+    }
+  } catch {
+    tools = undefined
+  }
+
   if (!tools?.register) {
     console.warn('[dsh-token-optima] ctx.tools unavailable; token_report / context_audit not registered')
     return
   }
 
+  // token_report 工具
   tools.register({
     name: 'token_report',
     description:
@@ -29,7 +34,13 @@ export function registerTools(ctx: Context, fold: SessionFold): void {
       },
       required: ['sessionId'],
     },
-    handler: async (args) => {
+    output: {
+      schema: { type: 'object' },
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text', text: JSON.stringify(value, null, 2) },
+      ],
+    },
+    async execute(args: Record<string, unknown>) {
       const sessionId = String(args['sessionId'] ?? '')
       const format = args['format'] === 'csv' ? 'csv' : 'json'
       if (format === 'csv') {
@@ -44,6 +55,7 @@ export function registerTools(ctx: Context, fold: SessionFold): void {
     },
   })
 
+  // context_audit 工具
   tools.register({
     name: 'context_audit',
     description:
@@ -56,7 +68,14 @@ export function registerTools(ctx: Context, fold: SessionFold): void {
       },
       required: ['sessionId', 'messageId'],
     },
-    handler: async (args) =>
-      fold.audit(String(args['sessionId'] ?? ''), String(args['messageId'] ?? '')),
+    output: {
+      schema: { type: 'object' },
+      render: (_args: unknown, value: unknown) => [
+        { type: 'text', text: JSON.stringify(value, null, 2) },
+      ],
+    },
+    async execute(args: Record<string, unknown>) {
+      return fold.audit(String(args['sessionId'] ?? ''), String(args['messageId'] ?? ''))
+    },
   })
 }

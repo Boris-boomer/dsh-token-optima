@@ -4,6 +4,7 @@ import { attributeTurn } from '../core/attribution.js'
 import { EstimatedTokenizer, type TokenizerAdapter } from '../core/tokenizer.js'
 import { ReasoningTracker } from '../core/reasoning.js'
 import { CATEGORIES, CATEGORY_GROUPS } from '../core/categories.js'
+import { calculateCost } from '../core/pricing.js' // 新增：引入费用核算
 import { toCsv } from './store-csv.js'
 import type {
   AssignableSource,
@@ -160,13 +161,6 @@ export class SessionFold {
     return this.currentSessionId
   }
 
-  /**
-   * 当前 session 里的 tool call 数量。
-   *
-   * 权威来源：`tool/call` 事件累计（已确认在 session/event 流里）。
-   * 兜底：当 tool/call 一个都没收到时，退回 surface 里 `source === 'tool_result'`
-   * 的节点数。
-   */
   getToolCallCount(sessionId: string): number {
     const state = this.byId.get(sessionId)
     if (!state) return 0
@@ -459,6 +453,14 @@ export class SessionFold {
         reasoningContent: reasoningText || null,
       },
     )
+
+    // --- 新增：计算费用 ---
+    const hitTokens = normalized.prompt_cache_hit_tokens ?? 0
+    const missTokens = normalized.prompt_cache_miss_tokens ?? 0
+    const outputTokens = normalized.completion_tokens ?? 0
+
+    attribution.cost = calculateCost(model, hitTokens, missTokens, outputTokens)
+    // ----------------------
 
     state.turns.push(attribution)
     if (state.turns.length > this.maxTurns) {

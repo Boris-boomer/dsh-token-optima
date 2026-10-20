@@ -24,7 +24,7 @@ export type { HealthReport, HealthFailure } from './host/health-probe.js'
 interface LooseCtx {
   on: (name: string, fn: (...args: unknown[]) => unknown) => void
   emit: (name: string, ...args: unknown[]) => void
-  get?: (key: string) => unknown
+  get?: (key: string, fallback?: unknown) => unknown
   root?: unknown
 }
 
@@ -110,6 +110,19 @@ function safeGet(obj: unknown, key: string): unknown {
   }
 }
 
+// 使用安全的 get 方式探测服务
+function getServiceSafe(c: unknown, key: string): unknown {
+  try {
+    const getFn = (c as LooseCtx)?.get
+    if (typeof getFn === 'function') {
+      return getFn.call(c, key, false)
+    }
+  } catch {
+    // ignore
+  }
+  return undefined
+}
+
 export function apply(ctx: Context, config: ConfigType): void {
   const health = new HealthProbe()
   const fold = new SessionFold(ctx, config, health)
@@ -127,8 +140,8 @@ export function apply(ctx: Context, config: ConfigType): void {
   const checkSessionsSvc = (): void => {
     try {
       const svc =
-        (rootCtx as unknown as LooseCtx).get?.('sessions') ??
-        (ctx as unknown as LooseCtx).get?.('sessions')
+        getServiceSafe(rootCtx, 'sessions') ??
+        getServiceSafe(ctx, 'sessions')
       health.checkSessionsService(svc)
     } catch (err) {
       health.fail('sessions 服务', `探测抛错：${(err as Error).message}`)
@@ -137,9 +150,9 @@ export function apply(ctx: Context, config: ConfigType): void {
 
   const replay = (): void => {
     try {
-      const sessionsSvc: unknown =
-        (rootCtx as unknown as LooseCtx).get?.('sessions') ??
-        (ctx as unknown as LooseCtx).get?.('sessions')
+      const sessionsSvc =
+        getServiceSafe(rootCtx, 'sessions') ??
+        getServiceSafe(ctx, 'sessions')
       health.checkSessionsService(sessionsSvc)
       if (!sessionsSvc || typeof sessionsSvc !== 'object') {
         fold.noteEvent('REPLAY: sessions service not found')
@@ -195,7 +208,19 @@ export function apply(ctx: Context, config: ConfigType): void {
     }
   }
 
-  const controller = new TokenOptimaController(rootCtx, fold, replay)
+  // 检查 tokenOptima 服务是否已注册
+  if (!getServiceSafe(ctx, 'tokenOptima')) {
+    const controller = new TokenOptimaController(ctx, fold, replay)
+    try {
+      const methods = remoteMethods(controller)
+      console.log(`[dsh-token-optima] loaded (${methods.length} remote methods)`)
+    } catch {
+      console.log('[dsh-token-optima] loaded')
+    }
+  } else {
+    fold.noteEvent('APPLY: tokenOptima already registered, skipping controller')
+    console.log('[dsh-token-optima] tokenOptima service already exists, skipping duplicate registration.')
+  }
 
   installEffortPolicy(ctx, config, fold, health)
 
@@ -208,7 +233,7 @@ export function apply(ctx: Context, config: ConfigType): void {
       // ignore
     }
     try {
-      const gw = loose.get?.('typertGateway') as Record<string, unknown> | undefined
+      const gw = getServiceSafe(ctx, 'typertGateway') as Record<string, unknown> | undefined
       if (gw) gw['srcClaims'] = undefined
     } catch {
       // ignore
@@ -253,13 +278,6 @@ export function apply(ctx: Context, config: ConfigType): void {
     clearInterval(healthTimer)
     fold.dispose()
   })
-
-  try {
-    const methods = remoteMethods(controller)
-    console.log(`[dsh-token-optima] loaded (${methods.length} remote methods)`)
-  } catch {
-    console.log('[dsh-token-optima] loaded')
-  }
 }
 
 export default { name, apply, Config }

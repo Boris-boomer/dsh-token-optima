@@ -13,6 +13,8 @@ export function toCsv(rows: TurnAttribution[]): string {
     'writeBlocks',
     'reasoningProduced',
     'reasoningReplayed',
+    'costTotal',       // 新增
+    'costSavedByCache' // 新增
   ]
   const lines = [header.join(',')]
   for (const r of rows) {
@@ -28,6 +30,8 @@ export function toCsv(rows: TurnAttribution[]): string {
       r.cacheBlocks.writeCandidateBlocks,
       r.reasoning.producedThisTurn,
       r.reasoning.replayedInInput,
+      r.cost?.total ?? 0,         // 新增
+      r.cost?.savedByCache ?? 0,  // 新增
     ]
     lines.push(cells.join(','))
   }

@@ -266,7 +266,19 @@ let root: ReturnType<typeof createRoot> | null = null
 let host: HTMLDivElement | null = null
 
 export async function apply(ctx: any) {
-  if (root && host && document.body.contains(host)) return
+  // 1. 强力清理上一次残留的 DOM 容器和 React 实例
+  document.querySelectorAll('[data-dsh-token-optima="1"]').forEach((el) => {
+    try { el.remove() } catch { /* ignore */ }
+  })
+  
+  if (root) {
+    try { root.unmount() } catch { /* ignore */ }
+    root = null
+  }
+  if (host) {
+    try { host.remove() } catch { /* ignore */ }
+    host = null
+  }
 
   if (typeof ctx?.remote?.$mount === 'function') {
     try {
@@ -278,12 +290,14 @@ export async function apply(ctx: any) {
     console.error('[dsh-token-optima/client] ctx.remote.$mount not available')
   }
 
+  // 2. 创建全新的挂载点
   host = document.createElement('div')
   host.dataset.dshTokenOptima = '1'
   document.body.appendChild(host)
   root = createRoot(host)
   root.render(<Root ctx={ctx} />)
 
+  // 3. 清理并重新注册全局图标，防止出现多个重复的 icon
   const registry = ((window as any).__dshIconRegistry ||= []) as Array<{
     id: string
     icon: string
@@ -291,16 +305,21 @@ export async function apply(ctx: any) {
     packageName?: string
     onClick?: () => void
   }>
-  if (!registry.some((e) => e.id === 'token-optima')) {
-    registry.push({
-      id: 'token-optima',
-      icon: '◎',
-      label: 'Token Optima',
-      packageName: 'dsh-token-optima',
-      onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
-    })
+  
+  const existingIndex = registry.findIndex((e) => e.id === 'token-optima')
+  if (existingIndex >= 0) {
+    registry.splice(existingIndex, 1)
   }
 
+  registry.push({
+    id: 'token-optima',
+    icon: '◎',
+    label: 'Token Optima',
+    packageName: 'dsh-token-optima',
+    onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
+  })
+
+  // 4. 清理逻辑
   ctx.on('dispose', () => {
     root?.unmount()
     root = null

@@ -92,6 +92,17 @@ export interface ReasoningSnapshot {
   contentHash: string | null;
 }
 
+// 新增：费用核算结构
+export interface CostBreakdown {
+  total: number;
+  savedByCache: number;
+  details: {
+    hitCost: number;
+    missCost: number;
+    outputCost: number;
+  };
+}
+
 export interface TurnAttribution {
   turnId: string;
   timestamp: number;
@@ -104,6 +115,7 @@ export interface TurnAttribution {
   cacheEvents: CacheEvent[];
   reasoning: ReasoningSnapshot;
   usage: DeepSeekUsage;
+  cost?: CostBreakdown; // 新增
 }
 
 export interface ClassifiedRequest {

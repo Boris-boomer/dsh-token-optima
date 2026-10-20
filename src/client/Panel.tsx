@@ -42,6 +42,16 @@ interface HealthReport {
   failures: Array<{ item: string; detail: string }>
 }
 
+interface CostBreakdown {
+  total: number
+  savedByCache: number
+  details: {
+    hitCost: number
+    missCost: number
+    outputCost: number
+  }
+}
+
 interface Report {
   turns: number
   latest: {
@@ -53,6 +63,7 @@ interface Report {
     reasoning: { producedThisTurn: number; replayedInInput: number }
     categories: Record<number, { value: number; precision: string }>
     unattributed?: { value: number; precision: string }
+    cost?: CostBreakdown
   } | null
   history: Array<{
     turnId: string
@@ -372,6 +383,10 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
     })
   }
 
+  // 费用展示辅助
+  const cost = report?.latest?.cost
+  const formatCurrency = (val: number) => `$${val.toFixed(5)}`
+
   return (
     <div ref={panelRef} style={merged}>
       <div
@@ -493,6 +508,39 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
           <div style={sectionStyle}>
             <Composition groups={groups} composition={composition} dark={dark} />
           </div>
+
+          {/* 新增：费用与缓存 ROI 面板 */}
+          {cost && (
+            <div
+              style={{
+                marginTop: '1.2em',
+                padding: '0.8em',
+                borderRadius: 8,
+                background: dark ? 'rgba(80, 200, 120, 0.08)' : 'rgba(80, 200, 120, 0.12)',
+                border: `1px solid ${dark ? 'rgba(80, 200, 120, 0.25)' : 'rgba(80, 200, 120, 0.3)'}`,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <div>
+                <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>
+                  缓存为你省下
+                </div>
+                <div style={{ fontSize: '1.2em', fontWeight: 700, color: colors.cache }}>
+                  {formatCurrency(cost.savedByCache)}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>
+                  本轮总花费
+                </div>
+                <div style={{ fontSize: '1.2em', fontWeight: 700, color: dark ? colors.text : colors.textLight }}>
+                  {formatCurrency(cost.total)}
+                </div>
+              </div>
+            </div>
+          )}
 
           <div style={sectionStyle}>
             <div style={sectionTitleStyle}>推理强度</div>
@@ -631,7 +679,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose })
           </div>
 
           <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>预算</div>
+            <div style={sectionTitleStyle}>预算（tokens）</div>
             <div
               style={{
                 fontVariantNumeric: 'tabular-nums',

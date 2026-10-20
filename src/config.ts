@@ -27,5 +27,5 @@ export const Config = z.object({
   reasoningEffort: z.string().default('high'),
   inlineTools: z.boolean().default(true),
   dynamicEffort: z.boolean().default(true),
-  debug: z.boolean().default(true),
+  debug: z.boolean().default(false),
 })

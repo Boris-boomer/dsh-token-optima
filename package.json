@@ -5,15 +5,15 @@
   "type": "module",
   "main": "lib/index.mjs",
   "types": "lib/types/index.d.ts",
-  "author": "Your Name <your.email@example.com>",
+  "author": "Boris-boomer",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourname/dsh-token-optima"
+    "url": "https://github.com/Boris-boomer/dsh-token-optima"
   },
-  "homepage": "https://github.com/yourname/dsh-token-optima#readme",
+  "homepage": "https://github.com/Boris-boomer/dsh-token-optima#readme",
   "bugs": {
-    "url": "https://github.com/yourname/dsh-token-optima/issues"
+    "url": "https://github.com/Boris-boomer/dsh-token-optima/issues"
   },
   "keywords": [
     "dsh",

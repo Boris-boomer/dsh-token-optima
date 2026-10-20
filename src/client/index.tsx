@@ -41,7 +41,27 @@ const Root: FC<RootProps> = ({ ctx }) => {
   const [dark, setDark] = useState<boolean>(() => detectDark())
   const [font, setFont] = useState<InheritedFont>(() => readInheritedFont())
 
+  // 新增：状态——网格中是否有我们的图标
+  const [hasGridIcon, setHasGridIcon] = useState(false)
+
   const activeSessionId = manualSessionId || hostSessionId || fetchSessionId
+
+  /* ---------- 新增：轮询检测网格状态 ---------- */
+  useEffect(() => {
+    const checkGrid = () => {
+      const registry = (window as any).__dshIconRegistry
+      if (Array.isArray(registry) && registry.some((e: any) => e.id === 'token-optima')) {
+        setHasGridIcon(true)
+      } else {
+        setHasGridIcon(false)
+      }
+    }
+    // 初始化检查一次
+    checkGrid()
+    // 应对 DSH 可能延迟初始化或清空 registry 的情况
+    const timer = setInterval(checkGrid, 1000)
+    return () => clearInterval(timer)
+  }, [])
 
   /* ---------- 主题 + 字体跟随 ---------- */
   useEffect(() => {
@@ -110,11 +130,7 @@ const Root: FC<RootProps> = ({ ctx }) => {
   }, [ctx])
 
   /* ---------- fetch hook：兜底抓 sessionId ----------
-   * 【开源声明】此处的 fetch 和 XMLHttpRequest 劫持，仅用于在本地读取 URL 中携带的 sessionId 参数。
-   * 本插件承诺：
-   * 1. 绝不修改请求内容、URL 或 Header。
-   * 2. 绝不拦截响应体。
-   * 3. 绝不将捕获的数据发送到除本地插件宿主之外的任何第三方。
+   * 仅用于读取 URL 中携带的 sessionId，绝不修改请求或发送数据。
    */
   useEffect(() => {
     const origFetch = window.fetch
@@ -262,24 +278,61 @@ const Root: FC<RootProps> = ({ ctx }) => {
     }
   }, [ctx, activeSessionId, titles])
 
-  if (!open) return null
+  // 决定是否显示悬浮球（条件：面板未打开，且网格中没有我们的图标）
+  const showFloatingBall = !open && !hasGridIcon
 
   return (
-    <Panel
-      ctx={ctx}
-      sessionId={activeSessionId}
-      title={titles[activeSessionId] ?? ''}
-      dark={dark}
-      font={font}
-      onClose={() => setOpen(false)}
-      onSessionChange={(id) => {
-        if (id === hostSessionId) {
-          setManualSessionId('')
-        } else {
-          setManualSessionId(id)
-        }
-      }}
-    />
+    <>
+      {/* 悬浮球兜底（仅在网格不可用时显示） */}
+      {showFloatingBall && (
+        <div
+          onClick={() => setOpen(true)}
+          style={{
+            position: 'fixed',
+            right: '24px',
+            bottom: '24px',
+            width: '48px',
+            height: '48px',
+            borderRadius: '50%',
+            background: dark ? 'rgba(20, 22, 28, 0.9)' : '#ffffff',
+            border: `1px solid ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            zIndex: 99998,
+            fontSize: '20px',
+            color: dark ? '#fff' : '#000',
+            transition: 'transform 0.2s ease',
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.05)')}
+          onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
+          title="Token Optima"
+        >
+          ◎
+        </div>
+      )}
+
+      {/* 面板本体 */}
+      {open && (
+        <Panel
+          ctx={ctx}
+          sessionId={activeSessionId}
+          title={titles[activeSessionId] ?? ''}
+          dark={dark}
+          font={font}
+          onClose={() => setOpen(false)}
+          onSessionChange={(id) => {
+            if (id === hostSessionId) {
+              setManualSessionId('')
+            } else {
+              setManualSessionId(id)
+            }
+          }}
+        />
+      )}
+    </>
   )
 }
 
@@ -287,6 +340,7 @@ let root: ReturnType<typeof createRoot> | null = null
 let host: HTMLDivElement | null = null
 
 export async function apply(ctx: any) {
+  // 强力清理上一次残留的 DOM 容器和 React 实例
   document.querySelectorAll('[data-dsh-token-optima="1"]').forEach((el) => {
     try { el.remove() } catch { /* ignore */ }
   })
@@ -316,26 +370,31 @@ export async function apply(ctx: any) {
   root = createRoot(host)
   root.render(<Root ctx={ctx} />)
 
-  const registry = ((window as any).__dshIconRegistry ||= []) as Array<{
+  // 尝试注入网格。如果 DSH 未提供 __dshIconRegistry，则不创建它。
+  // 这样可以确保在没有网格的环境下，悬浮球能正常兜底。
+  const registry = (window as any).__dshIconRegistry as Array<{
     id: string
     icon: string
     label: string
     packageName?: string
     onClick?: () => void
-  }>
-  
-  const existingIndex = registry.findIndex((e) => e.id === 'token-optima')
-  if (existingIndex >= 0) {
-    registry.splice(existingIndex, 1)
-  }
+  }> | undefined
 
-  registry.push({
-    id: 'token-optima',
-    icon: '◎',
-    label: 'Token Optima',
-    packageName: 'dsh-token-optima',
-    onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
-  })
+  if (registry) {
+    const existingIndex = registry.findIndex((e) => e.id === 'token-optima')
+    if (existingIndex >= 0) {
+      registry.splice(existingIndex, 1)
+    }
+    registry.push({
+      id: 'token-optima',
+      icon: '◎',
+      label: 'Token Optima',
+      packageName: 'dsh-token-optima',
+      onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
+    })
+  } else {
+    console.log('[dsh-token-optima] DSH icon grid not found, falling back to floating ball.')
+  }
 
   ctx.on('dispose', () => {
     root?.unmount()

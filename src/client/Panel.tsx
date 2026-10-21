@@ -8,7 +8,21 @@ import {
 } from 'react'
 import { Composition, type CompositionEntry, type GroupEntry } from './Composition.js'
 import { Trend, type TrendEntry } from './Trend.js'
-import { panelStyle, colors, type InheritedFont } from './styles.js'
+import { DARK, LIGHT, groupColor, type Theme } from './theme.js'
+import { ensureGlobalStyles, themeToCssVars, type InheritedFont } from './styles.js'
+import { formatCurrency, formatNumber, formatPercent, formatTime } from './format.js'
+import {
+  CloseIcon,
+  DownloadIcon,
+  LogoIcon,
+  SparkIcon,
+  WalletIcon,
+  WarningIcon,
+  ZapIcon,
+  ShrinkIcon,
+  ReplaceIcon,
+  ClockIcon,
+} from './Icon.js'
 
 interface Props {
   ctx: any
@@ -17,7 +31,7 @@ interface Props {
   dark: boolean
   font: InheritedFont
   onClose: () => void
-  onSessionChange: (id: string) => void // 新增：支持切换会话
+  onSessionChange: (id: string) => void
 }
 
 interface EffortDecision {
@@ -47,6 +61,8 @@ interface HealthReport {
 interface CostBreakdown {
   total: number
   savedByCache: number
+  isPeak: boolean
+  pricingVersion: string
 }
 
 interface Report {
@@ -139,7 +155,178 @@ function downloadBlob(filename: string, content: string, mime: string): void {
   }
 }
 
-export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, onSessionChange }) => {
+/* ---------------- 小部件 ---------------- */
+
+const Card: FC<{ theme: Theme; children: React.ReactNode; style?: CSSProperties }> = ({
+  theme,
+  children,
+  style,
+}) => (
+  <div
+    style={{
+      padding: '14px 16px',
+      borderRadius: 12,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      ...style,
+    }}
+  >
+    {children}
+  </div>
+)
+
+const SectionLabel: FC<{ theme: Theme; children: React.ReactNode; right?: React.ReactNode }> = ({
+  theme,
+  children,
+  right,
+}) => (
+  <div
+    style={{
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 10,
+    }}
+  >
+    <div
+      style={{
+        fontSize: 10.5,
+        fontWeight: 600,
+        color: theme.textTertiary,
+        textTransform: 'uppercase',
+        letterSpacing: '0.1em',
+      }}
+    >
+      {children}
+    </div>
+    {right}
+  </div>
+)
+
+const StatCard: FC<{
+  theme: Theme
+  label: string
+  value: string
+  accent: string
+  icon: React.ReactNode
+  sub?: React.ReactNode
+}> = ({ theme, label, value, accent, icon, sub }) => (
+  <div
+    style={{
+      padding: '14px 15px',
+      borderRadius: 11,
+      background: theme.surface,
+      border: `1px solid ${theme.border}`,
+      position: 'relative',
+      overflow: 'hidden',
+    }}
+  >
+    <div
+      style={{
+        position: 'absolute',
+        top: 12,
+        right: 12,
+        color: accent,
+        opacity: 0.55,
+        display: 'flex',
+      }}
+    >
+      {icon}
+    </div>
+    <div
+      style={{
+        fontSize: 10.5,
+        color: theme.textTertiary,
+        textTransform: 'uppercase',
+        letterSpacing: '0.09em',
+        fontWeight: 600,
+        marginBottom: 8,
+      }}
+    >
+      {label}
+    </div>
+    <div
+      style={{
+        fontSize: 22,
+        fontWeight: 600,
+        letterSpacing: '-0.02em',
+        color: accent,
+        fontVariantNumeric: 'tabular-nums',
+        lineHeight: 1.1,
+      }}
+    >
+      {value}
+    </div>
+    {sub && (
+      <div style={{ fontSize: 11, color: theme.textTertiary, marginTop: 6 }}>{sub}</div>
+    )}
+  </div>
+)
+
+const MiniMetric: FC<{
+  theme: Theme
+  label: string
+  primary: string
+  secondary?: string
+}> = ({ theme, label, primary, secondary }) => (
+  <div
+    style={{
+      padding: '10px 12px',
+      borderRadius: 9,
+      background: theme.bgElevated,
+      border: `1px solid ${theme.border}`,
+    }}
+  >
+    <div
+      style={{
+        fontSize: 10,
+        color: theme.textTertiary,
+        textTransform: 'uppercase',
+        letterSpacing: '0.08em',
+        fontWeight: 600,
+        marginBottom: 4,
+      }}
+    >
+      {label}
+    </div>
+    <div
+      style={{
+        fontSize: 15,
+        fontWeight: 600,
+        fontVariantNumeric: 'tabular-nums',
+        color: theme.text,
+        letterSpacing: '-0.01em',
+      }}
+    >
+      {primary}
+    </div>
+    {secondary && (
+      <div style={{ fontSize: 10.5, color: theme.textTertiary, marginTop: 2 }}>
+        {secondary}
+      </div>
+    )}
+  </div>
+)
+
+const RiskIcon: FC<{ kind: CacheRisk['kind']; size?: number }> = ({ kind, size = 13 }) => {
+  if (kind === 'compaction') return <ZapIcon size={size} />
+  if (kind === 'shrink') return <ShrinkIcon size={size} />
+  return <ReplaceIcon size={size} />
+}
+
+/* ---------------- 主体 ---------------- */
+
+export const Panel: FC<Props> = ({
+  ctx,
+  sessionId,
+  title,
+  dark,
+  font,
+  onClose,
+  onSessionChange,
+}) => {
+  const theme: Theme = dark ? DARK : LIGHT
+
   const [report, setReport] = useState<Report | null>(null)
   const [composition, setComposition] = useState<CompositionEntry[]>([])
   const [groups, setGroups] = useState<GroupEntry[]>([])
@@ -151,6 +338,10 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
   const [pos, setPos] = useState<{ x: number; y: number } | null>(() => loadPos())
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    ensureGlobalStyles()
+  }, [])
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -196,6 +387,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
 
   useEffect(() => {
     let cancelled = false
+    let debounce: ReturnType<typeof setTimeout> | null = null
 
     const refresh = async () => {
       const svc = getService(ctx)
@@ -206,9 +398,7 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
 
       try {
         const sessList = await svc.listSessions()
-        if (!cancelled) {
-          setSessions((sessList?.value ?? sessList) as SessionSummary[])
-        }
+        if (!cancelled) setSessions((sessList?.value ?? sessList) as SessionSummary[])
       } catch {
         // ignore
       }
@@ -228,7 +418,6 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
         } catch {
           // ignore
         }
-
         const [r, c, g] = await Promise.all([
           svc.report(sessionId),
           svc.composition(sessionId),
@@ -246,13 +435,38 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
       }
     }
 
+    const scheduleRefresh = () => {
+      if (debounce) clearTimeout(debounce)
+      debounce = setTimeout(() => {
+        debounce = null
+        void refresh()
+      }, 280)
+    }
+
     void refresh()
-    const t = setInterval(() => {
-      void refresh()
-    }, 2000)
+
+    let off: (() => void) | undefined
+    try {
+      const on = ctx?.on
+      if (typeof on === 'function') {
+        on.call(ctx, 'tokenOptima/updated', scheduleRefresh)
+        off = () => {
+          const offFn = ctx?.off
+          if (typeof offFn === 'function') {
+            offFn.call(ctx, 'tokenOptima/updated', scheduleRefresh)
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const t = setInterval(() => void refresh(), 10_000)
     return () => {
       cancelled = true
+      if (debounce) clearTimeout(debounce)
       clearInterval(t)
+      off?.()
     }
   }, [ctx, sessionId])
 
@@ -280,12 +494,12 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
   const historyList = report?.history ?? []
   const totalCostAllTime = historyList.reduce((sum, t) => sum + (t.cost?.total ?? 0), 0)
   const totalSavedAllTime = historyList.reduce((sum, t) => sum + (t.cost?.savedByCache ?? 0), 0)
-  
+
   let totalHit = 0
   let totalMiss = 0
   for (const t of historyList) {
     totalHit += t.cacheBlocks.hitBlocks
-    totalMiss += (t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks)
+    totalMiss += t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks
   }
   const totalBlocks = totalHit + totalMiss
   const cacheHitRate = totalBlocks > 0 ? (totalHit / totalBlocks) * 100 : 0
@@ -313,347 +527,641 @@ export const Panel: FC<Props> = ({ ctx, sessionId, title, dark, font, onClose, o
     }
   })
 
-  const sectionStyle: CSSProperties = {
-    marginTop: '1.3em',
-    paddingTop: '1.1em',
-    borderTop: `1px solid ${dark ? colors.border : colors.borderLight}`,
-  }
-
-  const sectionTitleStyle: CSSProperties = {
-    marginBottom: '0.7em',
-    color: colors.muted,
-    fontSize: '0.92em',
-    fontWeight: 500,
-    letterSpacing: 0.3,
-  }
-
-  const statRowStyle: CSSProperties = {
-    display: 'flex',
-    flexWrap: 'wrap',
-    gap: '1.2em',
-    fontVariantNumeric: 'tabular-nums',
-  }
-
-  const statLabelStyle: CSSProperties = {
-    color: colors.muted,
-    marginRight: '0.4em',
-    fontSize: '0.92em',
-  }
-
-  const statValueStyle: CSSProperties = {
-    fontWeight: 600,
-  }
-
-  const iconBtnStyle: CSSProperties = {
-    background: 'none',
-    border: `1px solid ${dark ? colors.border : colors.borderLight}`,
-    borderRadius: 6,
-    color: colors.muted,
-    cursor: 'pointer',
-    fontSize: '0.85em',
-    padding: '0.2em 0.5em',
-    lineHeight: 1.2,
-    fontFamily: 'inherit',
-  }
-
   const positionStyle: CSSProperties = pos
-    ? { position: 'fixed', left: pos.x, top: pos.y, right: 'auto', bottom: 'auto' }
-    : {}
+    ? { left: pos.x, top: pos.y, right: 'auto', bottom: 'auto' }
+    : { right: 24, bottom: 24 }
 
-  const merged = { ...panelStyle(dark, font), ...positionStyle }
+  const rootStyle: CSSProperties = {
+    ...themeToCssVars(theme),
+    position: 'fixed',
+    width: 468,
+    maxWidth: 'calc(100vw - 32px)',
+    maxHeight: '82vh',
+    display: 'flex',
+    flexDirection: 'column',
+    background: theme.bg,
+    color: theme.text,
+    fontFamily: font.fontFamily || theme.fontFamily,
+    fontSize: 13,
+    lineHeight: 1.5,
+    border: `1px solid ${theme.borderStrong}`,
+    borderRadius: 16,
+    boxShadow: theme.shadowLg,
+    overflow: 'hidden',
+    zIndex: 99999,
+    animation: 'to-scale-in 220ms cubic-bezier(0.4, 0, 0.2, 1)',
+    ...positionStyle,
+  }
 
-  const latestEffort = report?.effort && report.effort.length > 0 ? report.effort[report.effort.length - 1] : null
+  const latestEffort = report?.effort?.[report.effort.length - 1] ?? null
   const risks = (report?.cacheRisks ?? []).slice(-5).reverse()
 
-  const formatTime = (ts: number): string => {
-    try {
-      const d = new Date(ts)
-      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
-    } catch {
-      return ''
-    }
-  }
-
-  const shortId = sessionId ? sessionId.slice(-8) : '—'
   const drift = report?.latest?.alignmentDrift ?? 0
   const unattributed = report?.latest?.unattributed?.value ?? 0
   const foldFailures = report?.foldFailures ?? 0
   const health = report?.health
 
   const issues: Array<{ level: 'warn' | 'error'; text: string }> = []
-
   if (health && !health.ok) {
-    for (const f of health.failures) issues.push({ level: 'error', text: `DSH 接口变更：${f.item}（${f.detail}）` })
+    for (const f of health.failures) {
+      issues.push({ level: 'error', text: `DSH 接口变更：${f.item}（${f.detail}）` })
+    }
   }
-  if (drift > 0.03) issues.push({ level: 'warn', text: `估算偏差 ${(drift * 100).toFixed(1)}% — 1-9 类为客户端估算，非精确值` })
-  if (unattributed > 0) issues.push({ level: 'warn', text: `未归因 ${Math.round(unattributed)} tokens — 无法映射到任何来源` })
-  if (foldFailures > 0) issues.push({ level: 'error', text: `${foldFailures} 个事件解析失败，数据可能不完整` })
+  if (drift > 0.03) {
+    issues.push({
+      level: 'warn',
+      text: `估算偏差 ${(drift * 100).toFixed(1)}% — 1-9 类为客户端估算`,
+    })
+  }
+  if (unattributed > 0) {
+    issues.push({
+      level: 'warn',
+      text: `未归因 ${Math.round(unattributed)} tokens`,
+    })
+  }
+  if (foldFailures > 0) {
+    issues.push({ level: 'error', text: `${foldFailures} 个事件解析失败` })
+  }
 
   const cost = report?.latest?.cost
-  const formatCurrency = (val: number) => `$${val.toFixed(5)}`
+  const shortId = sessionId ? sessionId.slice(-6) : '—'
 
   return (
-    <div ref={panelRef} style={merged}>
-      <div
+    <div ref={panelRef} className="dsh-to-root" style={rootStyle}>
+      {/* header */}
+      <header
         onMouseDown={startDrag}
         style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 11,
+          padding: '13px 16px',
+          borderBottom: `1px solid ${theme.border}`,
+          background: theme.bg,
           cursor: 'grab',
           userSelect: 'none',
-          display: 'flex',
-          alignItems: 'flex-start',
-          justifyContent: 'space-between',
-          gap: '0.6em',
-          paddingBottom: '0.8em',
-          borderBottom: `1px solid ${dark ? colors.border : colors.borderLight}`,
+          flexShrink: 0,
         }}
       >
+        <div
+          style={{
+            width: 30,
+            height: 30,
+            borderRadius: 8,
+            background: theme.accentSoft,
+            color: theme.accent,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: 0,
+          }}
+        >
+          <LogoIcon size={18} />
+        </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: '1.05em', fontWeight: 600 }}>Token Optima</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, letterSpacing: '-0.005em' }}>
+            Token Optima
+          </div>
           <div
             style={{
-              color: colors.muted,
-              fontSize: '0.85em',
-              marginTop: '0.15em',
+              fontSize: 11,
+              color: theme.textSecondary,
+              marginTop: 1,
               display: 'flex',
               alignItems: 'center',
-              gap: '0.4em'
+              gap: 5,
+              overflow: 'hidden',
             }}
           >
-            {/* 新增：会话下拉选择器 */}
-            <select
-              value={sessionId}
-              onChange={(e) => onSessionChange(e.target.value)}
-              onMouseDown={(e) => e.stopPropagation()}
+            <span
               style={{
-                background: dark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.05)',
-                color: dark ? colors.text : colors.textLight,
-                border: 'none',
-                borderRadius: 4,
-                padding: '2px 4px',
-                fontSize: '0.95em',
-                maxWidth: '160px',
-                outline: 'none',
-                cursor: 'pointer'
+                fontFamily: theme.fontMono,
+                color: theme.textTertiary,
+                fontSize: 10,
+                letterSpacing: '0.02em',
               }}
             >
-              {sessions.map(s => (
-                <option key={s.sessionId} value={s.sessionId}>
-                  {s.sessionId.slice(-8)} ({s.turns}轮)
-                </option>
-              ))}
-              {!sessions.some(s => s.sessionId === sessionId) && sessionId && (
-                <option value={sessionId}>{shortId} (当前)</option>
-              )}
-            </select>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={title}>
-              {title || '（无标题）'}
+              #{shortId}
+            </span>
+            <span style={{ color: theme.textTertiary }}>·</span>
+            <span
+              style={{
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+              title={title}
+            >
+              {title || '未命名会话'}
             </span>
           </div>
         </div>
         <div
-          style={{ display: 'flex', gap: '0.4em', alignItems: 'center' }}
+          style={{ display: 'flex', alignItems: 'center', gap: 4 }}
           onMouseDown={(e) => e.stopPropagation()}
         >
+          {sessions.length > 0 && (
+            <select
+              className="to-select"
+              value={sessionId}
+              onChange={(e) => onSessionChange(e.target.value)}
+            >
+              {sessions.map((s) => (
+                <option key={s.sessionId} value={s.sessionId}>
+                  {s.sessionId.slice(-6)} · {s.turns}轮
+                </option>
+              ))}
+              {!sessions.some((s) => s.sessionId === sessionId) && sessionId && (
+                <option value={sessionId}>{shortId} · 当前</option>
+              )}
+            </select>
+          )}
           <button
+            className="to-icon-btn"
             onClick={handleExport}
-            onMouseDown={(e) => e.stopPropagation()}
             disabled={!sessionId || exporting || !report?.latest}
-            style={{
-              ...iconBtnStyle,
-              opacity: !sessionId || exporting || !report?.latest ? 0.4 : 1,
-              cursor: !sessionId || exporting || !report?.latest ? 'not-allowed' : 'pointer',
-            }}
             title="导出 CSV"
           >
-            {exporting ? '...' : 'CSV'}
+            <DownloadIcon size={15} />
           </button>
-          <button
-            onClick={onClose}
-            onMouseDown={(e) => e.stopPropagation()}
+          <button className="to-icon-btn" onClick={onClose} title="关闭">
+            <CloseIcon size={15} />
+          </button>
+        </div>
+      </header>
+
+      {/* body */}
+      <div
+        style={{
+          overflowY: 'auto',
+          padding: '14px 16px 18px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+        }}
+      >
+        {!sessionId && (
+          <Card theme={theme} style={{ textAlign: 'center', color: theme.textTertiary }}>
+            <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.4 }}>
+              <LogoIcon size={32} />
+            </div>
+            <div style={{ fontSize: 13 }}>等待会话激活...</div>
+          </Card>
+        )}
+
+        {sessionId && !ready && (
+          <Card theme={theme} style={{ textAlign: 'center', color: theme.textTertiary }}>
+            <div style={{ display: 'inline-flex', marginBottom: 10, animation: 'to-spin 1s linear infinite' }}>
+              <LogoIcon size={26} />
+            </div>
+            <div style={{ fontSize: 13 }}>加载中...</div>
+          </Card>
+        )}
+
+        {ready && error && (
+          <Card
+            theme={theme}
             style={{
-              background: 'none',
-              border: 'none',
-              color: colors.muted,
-              cursor: 'pointer',
-              fontSize: '1.4em',
-              padding: 0,
-              lineHeight: 1,
+              borderColor: theme.dangerSoft,
+              background: theme.dangerSoft,
+              color: theme.danger,
+              fontSize: 12,
             }}
           >
-            ×
-          </button>
-        </div>
+            {error}
+          </Card>
+        )}
+
+        {ready && !error && !report?.latest && issues.length === 0 && (
+          <Card theme={theme} style={{ textAlign: 'center', color: theme.textTertiary }}>
+            <div style={{ fontSize: 26, marginBottom: 8, opacity: 0.35 }}>
+              <SparkIcon size={30} />
+            </div>
+            <div style={{ fontSize: 13 }}>等待首次对话...</div>
+          </Card>
+        )}
+
+        {ready && !error && issues.length > 0 && (
+          <div
+            style={{
+              padding: '10px 12px',
+              borderRadius: 10,
+              background: theme.warningSoft,
+              border: `1px solid ${theme.warning}33`,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 5,
+            }}
+          >
+            {issues.map((it, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 7,
+                  fontSize: 11.5,
+                  lineHeight: 1.5,
+                  color: it.level === 'error' ? theme.danger : theme.warning,
+                }}
+              >
+                <span style={{ marginTop: 1, flexShrink: 0 }}>
+                  <WarningIcon size={12} />
+                </span>
+                <span>{it.text}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {ready && report?.latest && (
+          <>
+            {cost && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <StatCard
+                  theme={theme}
+                  label="本轮省下"
+                  value={formatCurrency(cost.savedByCache)}
+                  accent={theme.cache}
+                  icon={<SparkIcon size={16} />}
+                  sub={`累计 ${formatCurrency(totalSavedAllTime)}`}
+                />
+                <StatCard
+                  theme={theme}
+                  label="本轮花费"
+                  value={formatCurrency(cost.total)}
+                  accent={theme.text}
+                  icon={<WalletIcon size={16} />}
+                  sub={`累计 ${formatCurrency(totalCostAllTime)}`}
+                />
+              </div>
+            )}
+
+            {cost && (
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '8px 12px',
+                  borderRadius: 9,
+                  background: theme.bgElevated,
+                  border: `1px solid ${theme.border}`,
+                  fontSize: 11,
+                  color: theme.textSecondary,
+                }}
+              >
+                <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      background: cost.isPeak ? theme.warning : theme.success,
+                      animation: 'to-pulse 2s ease-in-out infinite',
+                    }}
+                  />
+                  {cost.isPeak ? '高峰时段' : '空闲时段'}
+                </span>
+                <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  命中率 {formatPercent(cacheHitRate, 1)}
+                </span>
+                <span style={{ color: theme.textTertiary, fontSize: 10 }}>
+                  {cost.pricingVersion}
+                </span>
+              </div>
+            )}
+
+            <Card theme={theme}>
+              <SectionLabel theme={theme}>Token 构成</SectionLabel>
+              <Composition groups={groups} composition={composition} theme={theme} />
+            </Card>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <MiniMetric
+                theme={theme}
+                label="缓存块"
+                primary={`${report.latest.cacheBlocks.hitBlocks} / ${report.latest.cacheBlocks.missBlocks + report.latest.cacheBlocks.writeCandidateBlocks}`}
+                secondary={`命中 / 总计 · 写入候选 ${report.latest.cacheBlocks.writeCandidateBlocks}`}
+              />
+              <MiniMetric
+                theme={theme}
+                label="推理 Token"
+                primary={`${formatNumber(report.latest.reasoning.producedThisTurn)}`}
+                secondary={`回传 ${formatNumber(report.latest.reasoning.replayedInInput)}`}
+              />
+              <MiniMetric
+                theme={theme}
+                label="推理强度"
+                primary={
+                  latestEffort
+                    ? latestEffort.decided === 'unsupported'
+                      ? '不支持'
+                      : latestEffort.decided
+                    : '—'
+                }
+                secondary={
+                  latestEffort && latestEffort.previous !== latestEffort.decided
+                    ? `${latestEffort.previous} → ${latestEffort.decided}`
+                    : latestEffort?.reason ?? '等待下次请求'
+                }
+              />
+              <MiniMetric
+                theme={theme}
+                label="预算使用"
+                primary={`${formatNumber(report.budget.usage.session)}`}
+                secondary={`日 ${formatNumber(report.budget.usage.daily)} · 月 ${formatNumber(report.budget.usage.monthly)}`}
+              />
+            </div>
+
+            <Card theme={theme}>
+              <SectionLabel
+                theme={theme}
+                right={
+                  risks.length > 0 ? (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        color: theme.warning,
+                        fontWeight: 500,
+                        padding: '2px 6px',
+                        borderRadius: 4,
+                        background: theme.warningSoft,
+                      }}
+                    >
+                      {risks.length}
+                    </span>
+                  ) : undefined
+                }
+              >
+                缓存风险
+              </SectionLabel>
+              {risks.length === 0 ? (
+                <div
+                  style={{
+                    fontSize: 12,
+                    color: theme.textTertiary,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                  }}
+                >
+                  <span style={{ color: theme.success }}>
+                    <SparkIcon size={13} />
+                  </span>
+                  前缀完整，无失效风险
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {risks.map((r, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        gap: 10,
+                        padding: '8px 10px',
+                        borderRadius: 8,
+                        background: theme.bgElevated,
+                        border: `1px solid ${theme.border}`,
+                      }}
+                    >
+                      <span
+                        style={{
+                          color: theme.warning,
+                          flexShrink: 0,
+                          marginTop: 1,
+                        }}
+                      >
+                        <RiskIcon kind={r.kind} size={14} />
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 6,
+                            marginBottom: 2,
+                          }}
+                        >
+                          <span style={{ fontSize: 12, fontWeight: 600, color: theme.text }}>
+                            {r.kind}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: 10,
+                              color: theme.textTertiary,
+                              fontFamily: theme.fontMono,
+                            }}
+                          >
+                            {formatTime(r.at)}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: 11, color: theme.textSecondary, lineHeight: 1.45 }}>
+                          {r.detail}
+                        </div>
+                        {r.changedSources && r.changedSources.length > 0 && (
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: 4,
+                              marginTop: 5,
+                            }}
+                          >
+                            {r.changedSources.map((s) => (
+                              <span
+                                key={s}
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: '1px 6px',
+                                  borderRadius: 4,
+                                  background: theme.surfaceHover,
+                                  color: theme.textSecondary,
+                                  fontFamily: theme.fontMono,
+                                }}
+                              >
+                                {s}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            {report.latest.cacheEvents.length > 0 && (
+              <Card theme={theme}>
+                <SectionLabel theme={theme}>本轮缓存事件</SectionLabel>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {report.latest.cacheEvents.map((e, i) => (
+                    <span
+                      key={i}
+                      style={{
+                        fontSize: 10.5,
+                        padding: '3px 8px',
+                        borderRadius: 5,
+                        background: theme.warningSoft,
+                        color: theme.warning,
+                        fontWeight: 500,
+                      }}
+                    >
+                      ⚡ {e.kind}
+                      <span style={{ opacity: 0.6, marginLeft: 4 }}>#{e.atChunkIndex}</span>
+                    </span>
+                  ))}
+                </div>
+              </Card>
+            )}
+
+            <Card theme={theme}>
+              <SectionLabel
+                theme={theme}
+                right={
+                  <span style={{ fontSize: 10, color: theme.textTertiary }}>
+                    近 {trend.length} 轮
+                  </span>
+                }
+              >
+                趋势
+              </SectionLabel>
+              <Trend entries={trend} theme={theme} />
+            </Card>
+
+            <Card theme={theme}>
+              <details className="to-details">
+                <summary
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 11.5,
+                    color: theme.textSecondary,
+                    fontWeight: 500,
+                  }}
+                >
+                  <span className="to-chevron">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M9 6l6 6-6 6" />
+                    </svg>
+                  </span>
+                  历史轮次明细
+                  <span style={{ color: theme.textTertiary, marginLeft: 4 }}>
+                    · {historyList.length} 轮
+                  </span>
+                </summary>
+                <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 10 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        {['#', '花费', '省下', '命中/未中'].map((h, i) => (
+                          <th
+                            key={h}
+                            style={{
+                              textAlign: i === 0 ? 'left' : 'right',
+                              padding: '6px 0 8px',
+                              fontSize: 10,
+                              fontWeight: 500,
+                              color: theme.textTertiary,
+                              textTransform: 'uppercase',
+                              letterSpacing: '0.08em',
+                            }}
+                          >
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[...historyList].reverse().map((t, idx) => (
+                        <tr
+                          key={t.turnId}
+                          style={{ borderTop: `1px solid ${theme.divider}` }}
+                        >
+                          <td
+                            style={{
+                              padding: '7px 0',
+                              color: theme.textTertiary,
+                              fontVariantNumeric: 'tabular-nums',
+                              fontSize: 11,
+                            }}
+                          >
+                            {historyList.length - idx}
+                          </td>
+                          <td
+                            style={{
+                              padding: '7px 0',
+                              textAlign: 'right',
+                              fontVariantNumeric: 'tabular-nums',
+                              color: theme.text,
+                            }}
+                          >
+                            {formatCurrency(t.cost?.total ?? 0)}
+                          </td>
+                          <td
+                            style={{
+                              padding: '7px 0',
+                              textAlign: 'right',
+                              fontVariantNumeric: 'tabular-nums',
+                              color: theme.cache,
+                            }}
+                          >
+                            {formatCurrency(t.cost?.savedByCache ?? 0)}
+                          </td>
+                          <td
+                            style={{
+                              padding: '7px 0',
+                              textAlign: 'right',
+                              fontVariantNumeric: 'tabular-nums',
+                              color: theme.textSecondary,
+                            }}
+                          >
+                            {t.cacheBlocks.hitBlocks}/
+                            {t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </Card>
+          </>
+        )}
       </div>
 
-      {!sessionId && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>等待会话激活...</div>}
-      {sessionId && !ready && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>加载中...</div>}
-      {ready && error && <div style={{ marginTop: '0.8em', color: '#E94B3C', fontSize: '0.92em' }}>{error}</div>}
-      {ready && !error && !report?.latest && issues.length === 0 && <div style={{ marginTop: '0.8em', color: colors.muted, fontSize: '0.92em' }}>等待首次对话...</div>}
-
-      {ready && !error && issues.length > 0 && (
-        <div
+      {/* footer */}
+      {report?.tokenizer && (
+        <footer
           style={{
-            marginTop: '0.9em',
-            padding: '0.6em 0.7em',
-            borderRadius: 6,
-            background: dark ? 'rgba(245,166,35,0.08)' : 'rgba(245,166,35,0.10)',
-            border: `1px solid ${dark ? 'rgba(245,166,35,0.35)' : 'rgba(245,166,35,0.45)'}`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '9px 16px',
+            borderTop: `1px solid ${theme.border}`,
+            fontSize: 10.5,
+            color: theme.textTertiary,
+            background: theme.bgElevated,
+            fontFamily: theme.fontMono,
+            flexShrink: 0,
           }}
         >
-          {issues.map((it, i) => (
-            <div key={i} style={{ fontSize: '0.88em', lineHeight: 1.55, color: it.level === 'error' ? '#E94B3C' : '#C77A00' }}>
-              ⚠ {it.text}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {ready && report?.latest && (
-        <>
-          <div style={sectionStyle}>
-            <Composition groups={groups} composition={composition} dark={dark} />
-          </div>
-
-          {cost && (
-            <div
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span
               style={{
-                marginTop: '1.2em',
-                borderRadius: 8,
-                background: dark ? 'rgba(80, 200, 120, 0.08)' : 'rgba(80, 200, 120, 0.12)',
-                border: `1px solid ${dark ? 'rgba(80, 200, 120, 0.25)' : 'rgba(80, 200, 120, 0.3)'}`,
-                overflow: 'hidden',
+                width: 5,
+                height: 5,
+                borderRadius: '50%',
+                background:
+                  report.tokenizer.precision === 'exact' ? theme.success : theme.warning,
               }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.8em' }}>
-                <div>
-                  <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>本轮缓存为你省下</div>
-                  <div style={{ fontSize: '1.2em', fontWeight: 700, color: colors.cache }}>{formatCurrency(cost.savedByCache)}</div>
-                </div>
-                <div style={{ textAlign: 'right' }}>
-                  <div style={{ color: colors.muted, fontSize: '0.85em', marginBottom: '0.2em' }}>本轮总花费</div>
-                  <div style={{ fontSize: '1.2em', fontWeight: 700, color: dark ? colors.text : colors.textLight }}>{formatCurrency(cost.total)}</div>
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', padding: '0.5em 0.8em', background: dark ? 'rgba(80, 200, 120, 0.1)' : 'rgba(80, 200, 120, 0.15)', borderTop: `1px dashed ${dark ? 'rgba(80, 200, 120, 0.3)' : 'rgba(80, 200, 120, 0.4)'}`, fontSize: '0.85em' }}>
-                <span style={{ color: colors.cache, fontWeight: 600 }}>会话累计省下 {formatCurrency(totalSavedAllTime)}</span>
-                <span style={{ color: colors.muted }}>累计花费 {formatCurrency(totalCostAllTime)} | 平均命中率 {cacheHitRate.toFixed(1)}%</span>
-              </div>
-            </div>
-          )}
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>推理强度</div>
-            {latestEffort ? (
-              latestEffort.decided === 'unsupported' ? (
-                <div style={{ color: colors.muted, fontSize: '0.92em' }}>{latestEffort.reason}</div>
-              ) : (
-                <div style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.92em' }}>
-                  <span style={{ fontWeight: 600 }}>{latestEffort.decided}</span>
-                  {latestEffort.previous !== latestEffort.decided && (
-                    <span style={{ color: colors.muted, marginLeft: '0.6em' }}>（{latestEffort.previous} → {latestEffort.decided}）</span>
-                  )}
-                  <div style={{ color: colors.muted, fontSize: '0.85em', marginTop: '0.2em' }}>{latestEffort.reason}</div>
-                </div>
-              )
-            ) : <div style={{ color: colors.muted, fontSize: '0.92em' }}>等待下次请求...</div>}
-          </div>
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>缓存块</div>
-            <div style={statRowStyle}>
-              <span><span style={statLabelStyle}>命中</span><span style={statValueStyle}>{report.latest.cacheBlocks.hitBlocks}</span></span>
-              <span><span style={statLabelStyle}>未命中</span><span style={statValueStyle}>{report.latest.cacheBlocks.missBlocks}</span></span>
-              <span><span style={statLabelStyle}>写入候选</span><span style={statValueStyle}>{report.latest.cacheBlocks.writeCandidateBlocks}</span></span>
-            </div>
-          </div>
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>推理 Token</div>
-            <div style={statRowStyle}>
-              <span><span style={statLabelStyle}>本轮新产生</span><span style={statValueStyle}>{report.latest.reasoning.producedThisTurn}</span></span>
-              <span><span style={statLabelStyle}>历史回传</span><span style={statValueStyle}>{report.latest.reasoning.replayedInInput}</span></span>
-            </div>
-          </div>
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>缓存风险</div>
-            {risks.length === 0 ? (
-              <div style={{ color: colors.muted, fontSize: '0.92em' }}>无（缓存前缀未被破坏）</div>
-            ) : (
-              risks.map((r, i) => (
-                <div key={i} style={{ fontSize: '0.9em', padding: '0.4em 0', borderBottom: i < risks.length - 1 ? `1px dashed ${dark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'}` : 'none' }}>
-                  <div>
-                    <span style={{ color: '#E94B3C', marginRight: '0.4em' }}>{r.kind === 'compaction' ? '⚡' : r.kind === 'shrink' ? '↓' : '↔'}</span>
-                    <span style={{ fontWeight: 600 }}>{r.kind}</span>
-                    <span style={{ color: colors.muted, marginLeft: '0.6em', fontSize: '0.85em' }}>{formatTime(r.at)}</span>
-                  </div>
-                  <div style={{ color: colors.muted, fontSize: '0.85em', paddingLeft: '1.2em', marginTop: '0.2em' }}>{r.detail}</div>
-                  {r.changedSources && r.changedSources.length > 0 && (
-                    <div style={{ color: '#C77A00', fontSize: '0.82em', paddingLeft: '1.2em', marginTop: '0.2em', fontWeight: 500 }}>⚠ 涉及来源：{r.changedSources.join(', ')}</div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-
-          {report.latest.cacheEvents.length > 0 && (
-            <div style={sectionStyle}>
-              <div style={sectionTitleStyle}>本轮缓存事件</div>
-              {report.latest.cacheEvents.map((e, i) => (
-                <div key={i} style={{ fontSize: '0.9em', padding: '0.15em 0' }}>⚡ {e.kind} @ block {e.atChunkIndex}</div>
-              ))}
-            </div>
-          )}
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>趋势（近 {trend.length} 轮）</div>
-            <Trend entries={trend} dark={dark} />
-          </div>
-
-          {/* 新增：同会话历史明细 */}
-          <div style={sectionStyle}>
-            <details>
-              <summary style={{ cursor: 'pointer', color: colors.muted, fontSize: '0.92em', userSelect: 'none' }}>
-                历史轮次明细（共 {historyList.length} 轮）
-              </summary>
-              <div style={{ maxHeight: 200, overflowY: 'auto', marginTop: '0.8em' }}>
-                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85em' }}>
-                  <thead>
-                    <tr style={{ color: colors.muted, textAlign: 'left', borderBottom: `1px solid ${dark ? colors.border : colors.borderLight}` }}>
-                      <th style={{ padding: '0.4em 0' }}>轮次</th>
-                      <th>花费</th>
-                      <th>省下</th>
-                      <th>命中/未中</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {[...historyList].reverse().map((t, idx) => (
-                      <tr key={t.turnId} style={{ borderBottom: `1px dashed ${dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)'}` }}>
-                        <td style={{ padding: '0.4em 0' }}>#{historyList.length - idx}</td>
-                        <td style={{ color: dark ? colors.text : colors.textLight }}>${(t.cost?.total ?? 0).toFixed(5)}</td>
-                        <td style={{ color: colors.cache }}>${(t.cost?.savedByCache ?? 0).toFixed(5)}</td>
-                        <td style={{ color: colors.muted }}>{t.cacheBlocks.hitBlocks} / {t.cacheBlocks.missBlocks + t.cacheBlocks.writeCandidateBlocks}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </details>
-          </div>
-
-          <div style={sectionStyle}>
-            <div style={sectionTitleStyle}>预算（tokens）</div>
-            <div style={{ fontVariantNumeric: 'tabular-nums', fontSize: '0.92em', lineHeight: 1.9 }}>
-              <div><span style={statLabelStyle}>会话</span>{report.budget.usage.session} / {report.budget.limits.session || '∞'}</div>
-              <div><span style={statLabelStyle}>日</span>{report.budget.usage.daily} / {report.budget.limits.daily || '∞'}</div>
-              <div><span style={statLabelStyle}>月</span>{report.budget.usage.monthly} / {report.budget.limits.monthly || '∞'}</div>
-            </div>
-          </div>
-
-          <div style={sectionStyle}>
-            <div style={{ color: colors.muted, fontSize: '0.85em' }}>tokenizer: {report.tokenizer.id} ({report.tokenizer.precision})</div>
-          </div>
-        </>
+            />
+            {report.tokenizer.id}
+          </span>
+          <span>{report.tokenizer.precision}</span>
+        </footer>
       )}
     </div>
   )

@@ -26,6 +26,7 @@ import {
   type SegmentLayout,
   type SourceCacheTally,
 } from './cache-model.js';
+import { calculateCost, type CostBreakdown } from './pricing.js';
 
 export interface AttributionOptions {
   blockSize?: number;
@@ -36,6 +37,9 @@ export interface AttributionOptions {
   hasTools?: boolean;
   reasoningContent?: string | null;
   replayedReasoningTokens?: number;
+  /** 用于峰谷计费判断 */
+  timestamp?: number;
+  extraOffPeakDates?: Set<string>;
 }
 
 export interface AttributionResult {
@@ -114,7 +118,6 @@ export function attributeTurn(
       ? Math.abs(estimatedTotal - promptTokens) / promptTokens
       : 0;
 
-  // 命中/未命中的原始估算
   const hitBySource = new Map<TokenSource, number>();
   const missBySource = new Map<TokenSource, number>();
   for (const t of tally) {
@@ -122,8 +125,6 @@ export function attributeTurn(
     if (t.miss > 0) missBySource.set(t.source, t.miss);
   }
 
-  // 对齐决策：drift 在阈值内 → 按比例缩放到 API 真值
-  //           drift 超阈     → 保留原始估算，残差归入 unattributed
   let alignedBySource: Map<TokenSource, number>;
   let alignedHit: Map<TokenSource, number>;
   let alignedMiss: Map<TokenSource, number>;
@@ -132,7 +133,6 @@ export function attributeTurn(
   const inThreshold = estimatedTotal > 0 && alignmentDrift <= driftThreshold;
 
   if (estimatedTotal <= 0) {
-    // 无客户端估算：全部归入 unattributed
     alignedBySource = new Map();
     alignedHit = new Map();
     alignedMiss = new Map();
@@ -142,12 +142,10 @@ export function attributeTurn(
       alignedMiss.set('unattributed', unattributedValue);
     }
   } else if (inThreshold) {
-    // 客户端估算可信：所有维度按比例缩放到 API 真值
     alignedBySource = scaleToTarget(estimatedBySource, promptTokens);
     alignedHit = scaleToTarget(hitBySource, hitTruth);
     alignedMiss = scaleToTarget(missBySource, missTruth);
   } else {
-    // 客户端估算不可信：保留原始值，残差归入 unattributed
     alignedBySource = new Map(estimatedBySource);
     alignedHit = new Map(hitBySource);
     alignedMiss = new Map(missBySource);
@@ -156,10 +154,8 @@ export function attributeTurn(
     if (residual > 0) {
       unattributedValue = residual;
       alignedBySource.set('unattributed', residual);
-      // unattributed 属于未命中：它不在客户端拼接的前缀里
       alignedMiss.set('unattributed', residual);
     } else {
-      // 估算超出真值：退回缩放
       alignedBySource = scaleToTarget(estimatedBySource, promptTokens);
       alignedMiss = scaleToTarget(missBySource, missTruth);
     }
@@ -194,10 +190,7 @@ export function attributeTurn(
         : null,
   };
 
-  // 14 类投影的精度：
-  //   tokenizer 非精确           → estimated（字符估算本身有偏差）
-  //   tokenizer 精确 + 对齐良好   → exact
-  //   tokenizer 精确 + 对齐超阈   → inferred（经过缩放或残差隔离）
+  // 精度：tokenizer 精确 + 对齐良好 → exact；tokenizer 估算 → estimated
   const sourcePrecision: Precision =
     tokenizer.precision !== 'exact'
       ? 'estimated'
@@ -229,9 +222,28 @@ export function attributeTurn(
   const matrix = buildMatrix(alignedBySource, alignedHit, alignedMiss, tally);
   const cacheBlocks = summarizeBlocks(chunks, verdicts, blockSize);
 
+  const timestamp = options.timestamp ?? Date.now();
+  const cost: CostBreakdown = calculateCost(
+    model,
+    hitTruth,
+    missTruth,
+    completionTokens,
+    { timestamp, extraOffPeakDates: options.extraOffPeakDates },
+  );
+
+  const otelAttributes: Record<string, number | string> = {
+    'gen_ai.system': 'deepseek',
+    'gen_ai.request.model': model,
+    'gen_ai.usage.input_tokens': promptTokens,
+    'gen_ai.usage.cache_read.input_tokens': hitTruth,
+    'gen_ai.usage.cache_creation.input_tokens': Math.round(writeCandidateTotal),
+    'gen_ai.usage.output_tokens': completionTokens,
+    'gen_ai.usage.output_tokens.reasoning': reasoningValue,
+  };
+
   const attribution: TurnAttribution = {
     turnId,
-    timestamp: Date.now(),
+    timestamp,
     model,
     categories,
     matrix,
@@ -241,6 +253,8 @@ export function attributeTurn(
     cacheEvents: events,
     reasoning: reasoningSnapshot,
     usage,
+    cost,
+    otelAttributes,
   };
 
   return { attribution, chunks };
@@ -302,7 +316,6 @@ function buildMatrix(
 
   const rows: SourceMatrixEntry[] = [];
   for (const source of sources) {
-    // 取整后再算 total，保证矩阵内每行自洽
     const hit = Math.round(alignedHit.get(source) ?? 0);
     const miss = Math.round(alignedMiss.get(source) ?? 0);
     const writeCandidate = Math.round(

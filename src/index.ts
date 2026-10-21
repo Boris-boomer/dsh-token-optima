@@ -9,10 +9,13 @@ import { SessionFold } from './host/session-fold.js'
 import { HealthProbe } from './host/health-probe.js'
 import { registerTools } from './host/tools.js'
 import { installEffortPolicy } from './host/effort-policy.js'
+import {
+  resolveTokenizer,
+  loadHfTokenizer,
+  type TokenizerAdapter,
+} from './core/tokenizer.js'
 
-// 唯一标识，用于诊断信息
 export const name = 'dsh-token-optima'
-// 显式声明依赖，告知 Cordis 等待 tools 就绪后再执行 apply
 export const inject = ['tools']
 
 export { Config, NS } from './config.js'
@@ -29,6 +32,7 @@ interface LooseCtx {
   emit: (name: string, ...args: unknown[]) => void
   get?: (key: string, fallback?: unknown) => unknown
   root?: unknown
+  effect?: <T>(execute: () => T, label?: string) => T
 }
 
 class TokenOptimaController extends TypertRemoteService {
@@ -95,15 +99,13 @@ class TokenOptimaController extends TypertRemoteService {
 
   @Remote
   async debugEventCount(): Promise<number> {
-    // 安全门控：未开启 debug 时拒绝暴露内部诊断数据
-    if (!(this.fold as any).config?.debug) return -1
+    if (!this.fold.isDebug()) return -1
     return this.fold.getObservedEventCount()
   }
 
   @Remote
   async debugLastEvents(): Promise<string[]> {
-    // 安全门控：未开启 debug 时拒绝暴露内部诊断数据
-    if (!(this.fold as any).config?.debug) return []
+    if (!this.fold.isDebug()) return []
     return this.fold.getRecentEventTypes()
   }
 }
@@ -117,7 +119,6 @@ function safeGet(obj: unknown, key: string): unknown {
   }
 }
 
-// 使用安全的 get 方式探测服务
 function getServiceSafe(c: unknown, key: string): unknown {
   try {
     const getFn = (c as LooseCtx)?.get
@@ -130,11 +131,70 @@ function getServiceSafe(c: unknown, key: string): unknown {
   return undefined
 }
 
+/**
+ * 优先从环境变量指定的路径加载 tokenizer.json + tokenizer_config.json；
+ * 任一文件缺失或加载失败时降级到字符估算。
+ *
+ *    DSH_TOKENIZER_JSON    tokenizer.json 路径（必需才启用 exact）
+ *    DSH_TOKENIZER_CONFIG  tokenizer_config.json 路径（推荐，缺省也能工作）
+ */
+async function resolveHostTokenizer(): Promise<TokenizerAdapter> {
+  const jsonPath = process.env.DSH_TOKENIZER_JSON
+  if (!jsonPath) {
+    const resolved = await resolveTokenizer()
+    if (resolved.warning) {
+      console.warn(`[dsh-token-optima] tokenizer: ${resolved.warning}`)
+    }
+    return resolved.tokenizer
+  }
+
+  const configPath = process.env.DSH_TOKENIZER_CONFIG
+
+  try {
+    const enc = await loadHfTokenizer(jsonPath, configPath)
+    const resolved = await resolveTokenizer({ hfLoader: async () => enc })
+    if (resolved.warning) {
+      console.warn(`[dsh-token-optima] ${resolved.warning}`)
+    }
+    return resolved.tokenizer
+  } catch (err) {
+    const resolved = await resolveTokenizer()
+    if (resolved.warning) {
+      console.warn(
+        `[dsh-token-optima] HF tokenizer load failed (${(err as Error).message}); ` +
+        `falling back to estimation.`,
+      )
+    }
+    return resolved.tokenizer
+  }
+}
+
 export function apply(ctx: Context, config: ConfigType): void {
   const health = new HealthProbe()
+
+  // 先挂一个估算 fold，精确 tokenizer 就绪后通过 setTokenizer 原地升级。
+  //
+  // 关键设计：fold 实例只创建一次。控制器 / effort-policy / tools 都持有
+  // 同一个 fold 引用，所以「运行期升级 tokenizer」不能换实例，只能改内部字段，
+  // 否则面板查的还是旧 fold，永远是 0 turns。
   const fold = new SessionFold(ctx, config, health)
+  let disposed = false
 
   fold.noteEvent('APPLY: entered')
+
+  void resolveHostTokenizer()
+    .then((tokenizer) => {
+      if (disposed) return
+      if (tokenizer.precision === 'exact') {
+        fold.setTokenizer(tokenizer)
+        fold.noteEvent(`APPLY: exact tokenizer ready (${tokenizer.id})`)
+      } else {
+        fold.noteEvent(`APPLY: tokenizer fallback (${tokenizer.id})`)
+      }
+    })
+    .catch((err) => {
+      fold.noteEvent(`APPLY: tokenizer init error ${(err as Error).message}`)
+    })
 
   if (!config.enabled) {
     fold.noteEvent('APPLY: disabled by config')
@@ -211,7 +271,6 @@ export function apply(ctx: Context, config: ConfigType): void {
     }
   }
 
-  // 检查 tokenOptima 服务是否已注册
   if (!getServiceSafe(ctx, 'tokenOptima')) {
     const controller = new TokenOptimaController(ctx, fold, replay)
     try {
@@ -242,43 +301,109 @@ export function apply(ctx: Context, config: ConfigType): void {
       // ignore
     }
   }
-  setTimeout(kick, 100)
-  setTimeout(kick, 1000)
-  setTimeout(kick, 5000)
 
-  setTimeout(replay, 500)
-  setTimeout(replay, 2000)
-  setTimeout(replay, 6000)
+  // 所有定时器/监听器统一交给 ctx.effect 管理，热重载与卸载时自动回收
+  const effect = loose.effect
+  if (typeof effect === 'function') {
+    effect(() => {
+      const timers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>> = []
+      timers.push(setTimeout(kick, 100))
+      timers.push(setTimeout(kick, 1000))
+      timers.push(setTimeout(kick, 5000))
 
-  const replayTimer = setInterval(replay, 5000)
-  const healthTimer = setInterval(checkSessionsSvc, 30_000)
+      timers.push(setTimeout(replay, 500))
+      timers.push(setTimeout(replay, 2000))
+      timers.push(setTimeout(replay, 6000))
 
-  loose.on('session/event', (s: unknown) => {
-    try {
-      fold.observe(s)
-    } catch (err) {
-      fold.noteEvent(`EVENT: plugin-ctx error ${(err as Error).message}`)
-    }
-  })
+      timers.push(setInterval(replay, 5000))
+      timers.push(setInterval(checkSessionsSvc, 30_000))
 
-  if (rootCtx !== ctx) {
-    const rootLoose = rootCtx as unknown as LooseCtx
-    rootLoose.on('session/event', (s: unknown) => {
+      return () => {
+        for (const t of timers) {
+          clearTimeout(t as ReturnType<typeof setTimeout>)
+          clearInterval(t as ReturnType<typeof setInterval>)
+        }
+      }
+    }, 'token-optima/timers')
+
+    effect(() => {
+      const handler = (s: unknown): void => {
+        try {
+          fold.observe(s)
+        } catch (err) {
+          fold.noteEvent(`EVENT: plugin-ctx error ${(err as Error).message}`)
+        }
+      }
+      loose.on('session/event', handler)
+
+      const rootHandler = (s: unknown): void => {
+        try {
+          fold.observe(s)
+        } catch (err) {
+          fold.noteEvent(`EVENT: root-ctx error ${(err as Error).message}`)
+        }
+      }
+      let rootAttached = false
+      if (rootCtx !== ctx) {
+        ;(rootCtx as unknown as LooseCtx).on('session/event', rootHandler)
+        rootAttached = true
+      }
+
+      return () => {
+        // Cordis 通常会自动清理通过 ctx.on 注册的监听器；
+        // 这里显式保留 disposer，避免不同版本行为差异。
+        void handler
+        void rootHandler
+        void rootAttached
+      }
+    }, 'token-optima/session-event')
+
+    effect(() => {
+      return () => {
+        disposed = true
+        health.dispose()
+        fold.dispose()
+      }
+    }, 'token-optima/dispose')
+  } else {
+    // 极老版本 Cordis 没有 effect：退化为手动清理，但保留 dispose 钩子
+    setTimeout(kick, 100)
+    setTimeout(kick, 1000)
+    setTimeout(kick, 5000)
+    setTimeout(replay, 500)
+    setTimeout(replay, 2000)
+    setTimeout(replay, 6000)
+
+    const replayTimer = setInterval(replay, 5000)
+    const healthTimer = setInterval(checkSessionsSvc, 30_000)
+
+    loose.on('session/event', (s: unknown) => {
       try {
         fold.observe(s)
       } catch (err) {
-        fold.noteEvent(`EVENT: root-ctx error ${(err as Error).message}`)
+        fold.noteEvent(`EVENT: plugin-ctx error ${(err as Error).message}`)
       }
+    })
+    if (rootCtx !== ctx) {
+      ;(rootCtx as unknown as LooseCtx).on('session/event', (s: unknown) => {
+        try {
+          fold.observe(s)
+        } catch (err) {
+          fold.noteEvent(`EVENT: root-ctx error ${(err as Error).message}`)
+        }
+      })
+    }
+
+    loose.on('dispose', () => {
+      disposed = true
+      clearInterval(replayTimer)
+      clearInterval(healthTimer)
+      health.dispose()
+      fold.dispose()
     })
   }
 
   if (config.inlineTools) {
     registerTools(ctx, fold)
   }
-
-  loose.on('dispose', () => {
-    clearInterval(replayTimer)
-    clearInterval(healthTimer)
-    fold.dispose()
-  })
 }

@@ -1,7 +1,9 @@
 import { createRoot } from 'react-dom/client'
 import { useState, useEffect, type FC } from 'react'
 import { Panel } from './Panel.js'
-import { detectDark, readInheritedFont, type InheritedFont } from './styles.js'
+import { detectDark, ensureGlobalStyles, readInheritedFont, type InheritedFont } from './styles.js'
+import { DARK, LIGHT } from './theme.js'
+import { LogoIcon } from './Icon.js'
 import { TYPERT_REMOTE } from './descriptors.js'
 
 export const inject = ['remote']
@@ -32,6 +34,60 @@ interface RootProps {
   ctx: any
 }
 
+const FloatingButton: FC<{
+  dark: boolean
+  onClick: () => void
+}> = ({ dark, onClick }) => {
+  const theme = dark ? DARK : LIGHT
+  const [hover, setHover] = useState(false)
+
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      title="Token Optima"
+      style={{
+        position: 'fixed',
+        right: 24,
+        bottom: 24,
+        width: 52,
+        height: 52,
+        borderRadius: 16,
+        border: 'none',
+        padding: 0,
+        background: dark
+          ? `linear-gradient(140deg, ${theme.surface} 0%, ${theme.bgElevated} 100%)`
+          : `linear-gradient(140deg, #FFFFFF 0%, ${theme.surfaceHover} 100%)`,
+        color: theme.accent,
+        cursor: 'pointer',
+        boxShadow: hover
+          ? `0 12px 32px ${theme.accent}40, 0 0 0 1px ${theme.borderStrong}, inset 0 1px 0 rgba(255,255,255,${dark ? '0.06' : '0.9'})`
+          : `0 6px 20px rgba(0,0,0,${dark ? '0.5' : '0.12'}), 0 0 0 1px ${theme.border}`,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 99998,
+        transform: hover ? 'translateY(-2px) scale(1.04)' : 'translateY(0) scale(1)',
+        transition: 'transform 200ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 200ms ease',
+        fontFamily: theme.fontFamily,
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          inset: 1,
+          borderRadius: 15,
+          background: hover ? theme.accentSoft : 'transparent',
+          transition: 'background 200ms ease',
+          pointerEvents: 'none',
+        }}
+      />
+      <LogoIcon size={24} />
+    </button>
+  )
+}
+
 const Root: FC<RootProps> = ({ ctx }) => {
   const [open, setOpen] = useState(false)
   const [hostSessionId, setHostSessionId] = useState('')
@@ -40,30 +96,33 @@ const Root: FC<RootProps> = ({ ctx }) => {
   const [titles, setTitles] = useState<Record<string, string>>({})
   const [dark, setDark] = useState<boolean>(() => detectDark())
   const [font, setFont] = useState<InheritedFont>(() => readInheritedFont())
-
-  // 新增：状态——网格中是否有我们的图标
   const [hasGridIcon, setHasGridIcon] = useState(false)
 
   const activeSessionId = manualSessionId || hostSessionId || fetchSessionId
 
-  /* ---------- 新增：轮询检测网格状态 ---------- */
+  useEffect(() => {
+    ensureGlobalStyles()
+  }, [])
+
   useEffect(() => {
     const checkGrid = () => {
       const registry = (window as any).__dshIconRegistry
-      if (Array.isArray(registry) && registry.some((e: any) => e.id === 'token-optima')) {
-        setHasGridIcon(true)
-      } else {
-        setHasGridIcon(false)
-      }
+      setHasGridIcon(
+        Array.isArray(registry) && registry.some((e: any) => e.id === 'token-optima'),
+      )
     }
-    // 初始化检查一次
     checkGrid()
-    // 应对 DSH 可能延迟初始化或清空 registry 的情况
-    const timer = setInterval(checkGrid, 1000)
-    return () => clearInterval(timer)
+
+    const observer = new MutationObserver(checkGrid)
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    const t = setInterval(checkGrid, 30_000)
+    return () => {
+      observer.disconnect()
+      clearInterval(t)
+    }
   }, [])
 
-  /* ---------- 主题 + 字体跟随 ---------- */
   useEffect(() => {
     const update = (): void => {
       setDark(detectDark())
@@ -96,7 +155,6 @@ const Root: FC<RootProps> = ({ ctx }) => {
     }
   }, [])
 
-  /* ---------- 从 host 轮询当前会话 ---------- */
   useEffect(() => {
     let cancelled = false
     const refresh = async (): Promise<void> => {
@@ -109,9 +167,7 @@ const Root: FC<RootProps> = ({ ctx }) => {
         const id = v?.currentSessionId ?? ''
         if (id) {
           setHostSessionId((prev) => {
-            if (prev !== id && prev !== '') {
-              setManualSessionId('')
-            }
+            if (prev !== id && prev !== '') setManualSessionId('')
             return id
           })
         }
@@ -120,22 +176,35 @@ const Root: FC<RootProps> = ({ ctx }) => {
       }
     }
     void refresh()
-    const t = setInterval(() => {
-      void refresh()
-    }, 2000)
+
+    let off: (() => void) | undefined
+    try {
+      const on = ctx?.on
+      if (typeof on === 'function') {
+        const handler = () => void refresh()
+        on.call(ctx, 'tokenOptima/updated', handler)
+        off = () => {
+          const offFn = ctx?.off
+          if (typeof offFn === 'function') {
+            offFn.call(ctx, 'tokenOptima/updated', handler)
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    const t = setInterval(() => void refresh(), 10_000)
     return () => {
       cancelled = true
       clearInterval(t)
+      off?.()
     }
   }, [ctx])
 
-  /* ---------- fetch hook：兜底抓 sessionId ----------
-   * 仅用于读取 URL 中携带的 sessionId，绝不修改请求或发送数据。
-   */
   useEffect(() => {
     const origFetch = window.fetch
     const origOpen = XMLHttpRequest.prototype.open
-
     const scan = (url: string): void => {
       try {
         const m = url.match(/[?&]sessionId=(session-[0-9a-f-]+)/i)
@@ -147,7 +216,6 @@ const Root: FC<RootProps> = ({ ctx }) => {
         // ignore
       }
     }
-
     const fetchHandler = function (
       this: typeof window,
       ...args: Parameters<typeof fetch>
@@ -168,7 +236,6 @@ const Root: FC<RootProps> = ({ ctx }) => {
       }
       return origFetch.apply(this, args)
     }
-
     const openHandler = function (
       this: XMLHttpRequest,
       method: string,
@@ -183,21 +250,17 @@ const Root: FC<RootProps> = ({ ctx }) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return (origOpen as any).apply(this, [method, url, ...rest])
     }
-
     window.fetch = fetchHandler as typeof fetch
     XMLHttpRequest.prototype.open = openHandler as typeof XMLHttpRequest.prototype.open
-
     return () => {
       window.fetch = origFetch
       XMLHttpRequest.prototype.open = origOpen
     }
   }, [])
 
-  /* ---------- 拉会话标题 ---------- */
   useEffect(() => {
     const svc = getSessionSvc(ctx)
     if (!svc) return
-
     let cancelled = false
     const refresh = async (): Promise<void> => {
       try {
@@ -221,25 +284,20 @@ const Root: FC<RootProps> = ({ ctx }) => {
         // ignore
       }
     }
-
     void refresh()
-    const t = setInterval(() => {
-      void refresh()
-    }, 5000)
+    const t = setInterval(() => void refresh(), 30_000)
     return () => {
       cancelled = true
       clearInterval(t)
     }
   }, [ctx])
 
-  /* ---------- icon-grid 点击 ---------- */
   useEffect(() => {
     const handler = (): void => setOpen((prev) => !prev)
     window.addEventListener('token-optima:toggle', handler)
     return () => window.removeEventListener('token-optima:toggle', handler)
   }, [])
 
-  /* ---------- 从 host 拿 debug 开关 ---------- */
   useEffect(() => {
     const svc = getService(ctx)
     if (!svc) return
@@ -278,43 +336,11 @@ const Root: FC<RootProps> = ({ ctx }) => {
     }
   }, [ctx, activeSessionId, titles])
 
-  // 决定是否显示悬浮球（条件：面板未打开，且网格中没有我们的图标）
   const showFloatingBall = !open && !hasGridIcon
 
   return (
     <>
-      {/* 悬浮球兜底（仅在网格不可用时显示） */}
-      {showFloatingBall && (
-        <div
-          onClick={() => setOpen(true)}
-          style={{
-            position: 'fixed',
-            right: '24px',
-            bottom: '24px',
-            width: '48px',
-            height: '48px',
-            borderRadius: '50%',
-            background: dark ? 'rgba(20, 22, 28, 0.9)' : '#ffffff',
-            border: `1px solid ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            cursor: 'pointer',
-            zIndex: 99998,
-            fontSize: '20px',
-            color: dark ? '#fff' : '#000',
-            transition: 'transform 0.2s ease',
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.05)')}
-          onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-          title="Token Optima"
-        >
-          ◎
-        </div>
-      )}
-
-      {/* 面板本体 */}
+      {showFloatingBall && <FloatingButton dark={dark} onClick={() => setOpen(true)} />}
       {open && (
         <Panel
           ctx={ctx}
@@ -324,11 +350,8 @@ const Root: FC<RootProps> = ({ ctx }) => {
           font={font}
           onClose={() => setOpen(false)}
           onSessionChange={(id) => {
-            if (id === hostSessionId) {
-              setManualSessionId('')
-            } else {
-              setManualSessionId(id)
-            }
+            if (id === hostSessionId) setManualSessionId('')
+            else setManualSessionId(id)
           }}
         />
       )}
@@ -340,17 +363,30 @@ let root: ReturnType<typeof createRoot> | null = null
 let host: HTMLDivElement | null = null
 
 export async function apply(ctx: any) {
-  // 强力清理上一次残留的 DOM 容器和 React 实例
+  ensureGlobalStyles()
+
   document.querySelectorAll('[data-dsh-token-optima="1"]').forEach((el) => {
-    try { el.remove() } catch { /* ignore */ }
+    try {
+      el.remove()
+    } catch {
+      /* ignore */
+    }
   })
-  
+
   if (root) {
-    try { root.unmount() } catch { /* ignore */ }
+    try {
+      root.unmount()
+    } catch {
+      /* ignore */
+    }
     root = null
   }
   if (host) {
-    try { host.remove() } catch { /* ignore */ }
+    try {
+      host.remove()
+    } catch {
+      /* ignore */
+    }
     host = null
   }
 
@@ -370,30 +406,29 @@ export async function apply(ctx: any) {
   root = createRoot(host)
   root.render(<Root ctx={ctx} />)
 
-  // 尝试注入网格。如果 DSH 未提供 __dshIconRegistry，则不创建它。
-  // 这样可以确保在没有网格的环境下，悬浮球能正常兜底。
-  const registry = (window as any).__dshIconRegistry as Array<{
-    id: string
-    icon: string
-    label: string
-    packageName?: string
-    onClick?: () => void
-  }> | undefined
+  const registry = (window as any).__dshIconRegistry as
+    | Array<{
+        id: string
+        icon: string
+        label: string
+        packageName?: string
+        onClick?: () => void
+      }>
+    | undefined
 
   if (registry) {
     const existingIndex = registry.findIndex((e) => e.id === 'token-optima')
-    if (existingIndex >= 0) {
-      registry.splice(existingIndex, 1)
-    }
+    if (existingIndex >= 0) registry.splice(existingIndex, 1)
     registry.push({
       id: 'token-optima',
-      icon: '◎',
+      // 水晶球：彩色 Emoji，寓意洞察与监测
+      icon: '🔮',
       label: 'Token Optima',
       packageName: 'dsh-token-optima',
       onClick: () => window.dispatchEvent(new CustomEvent('token-optima:toggle')),
     })
   } else {
-    console.log('[dsh-token-optima] DSH icon grid not found, falling back to floating ball.')
+    console.log('[dsh-token-optima] DSH icon grid not found, falling back to floating button.')
   }
 
   ctx.on('dispose', () => {

@@ -42,6 +42,7 @@ interface InternalState {
   surfaceLength: number
   toolCallCount: number
   prevSources: AssignableSource[]
+  lastAccessedAt: number
 }
 
 export interface CacheRisk {
@@ -64,10 +65,17 @@ export interface SessionSummary {
   totalSaved: number
 }
 
+const MAX_SESSIONS = 100
+const MAX_TURNS_PER_SESSION = 200
+const MAX_RISKS = 100
+const MAX_EFFORT_DECISIONS = 100
+
 export class SessionFold {
   private readonly byWeak = new WeakMap<object, InternalState>()
   private readonly byId = new Map<string, InternalState>()
-  private readonly tokenizer: TokenizerAdapter
+  // tokenizer 允许运行期升级：估算 → 精确（setTokenizer）。
+  // 已 fold 的 turn 不重算，后续轮次使用精确 tokenizer。
+  private tokenizer: TokenizerAdapter
   private readonly reasoning: ReasoningTracker
   private readonly budget: BudgetTracker
   private readonly maxTurns: number
@@ -92,16 +100,41 @@ export class SessionFold {
     private readonly ctx: Context,
     private readonly config: Config,
     private readonly health: HealthProbe,
+    tokenizer?: TokenizerAdapter,
   ) {
     void ctx
-    this.tokenizer = new EstimatedTokenizer()
+    this.tokenizer = tokenizer ?? new EstimatedTokenizer()
     this.reasoning = new ReasoningTracker(config.hashSalt)
     this.budget = new BudgetTracker({
       session: config.budgetSession || undefined,
       daily: config.budgetDaily || undefined,
       monthly: config.budgetMonthly || undefined,
     })
-    this.maxTurns = 200
+    this.maxTurns = MAX_TURNS_PER_SESSION
+  }
+
+  /** 暴露 tokenizer 精度给外部诊断 */
+  getTokenizer(): TokenizerAdapter {
+    return this.tokenizer
+  }
+
+  /**
+   * 运行期把估算 tokenizer 升级为精确 tokenizer。
+   *
+   * 只允许「估算 → 精确」单向升级，防止已被精确 tokenizer 覆盖的实例被回退。
+   * 已经 fold 过的 turn 不重算（重算需要重新走 attributeTurn，成本高且容易
+   * 与 consumed 游标冲突）；之后新产生的 turn 会用精确 tokenizer。
+   */
+  setTokenizer(tokenizer: TokenizerAdapter): void {
+    if (tokenizer.precision === 'exact' && this.tokenizer.precision !== 'exact') {
+      const prevId = this.tokenizer.id
+      this.tokenizer = tokenizer
+      this.noteEvent(`TOKENIZER: upgraded ${prevId} → ${tokenizer.id} (exact)`)
+    }
+  }
+
+  isDebug(): boolean {
+    return this.config.debug
   }
 
   noteEvent(line: string): void {
@@ -126,8 +159,8 @@ export class SessionFold {
 
   recordEffortDecision(d: { sessionId: string; previous: string; decided: string; reason: string }): void {
     this.effortDecisions.push({ ...d, at: Date.now() })
-    if (this.effortDecisions.length > 100) {
-      this.effortDecisions.splice(0, this.effortDecisions.length - 100)
+    if (this.effortDecisions.length > MAX_EFFORT_DECISIONS) {
+      this.effortDecisions.splice(0, this.effortDecisions.length - MAX_EFFORT_DECISIONS)
     }
   }
 
@@ -204,14 +237,20 @@ export class SessionFold {
 
   private stateOf(session: object): InternalState {
     const cached = this.byWeak.get(session)
-    if (cached) return cached
+    if (cached) {
+      cached.lastAccessedAt = Date.now()
+      return cached
+    }
 
     const id = this.idOf(session)
     const existing = this.byId.get(id)
     if (existing) {
       this.byWeak.set(session, existing)
+      existing.lastAccessedAt = Date.now()
       return existing
     }
+
+    this.evictIfNeeded()
 
     const s: InternalState = {
       sessionId: id,
@@ -225,10 +264,24 @@ export class SessionFold {
       surfaceLength: 0,
       toolCallCount: 0,
       prevSources: [],
+      lastAccessedAt: Date.now(),
     }
     this.byWeak.set(session, s)
     this.byId.set(id, s)
     return s
+  }
+
+  private evictIfNeeded(): void {
+    if (this.byId.size < MAX_SESSIONS) return
+    let oldestKey: string | null = null
+    let oldestTs = Infinity
+    for (const [k, v] of this.byId) {
+      if (v.lastAccessedAt < oldestTs) {
+        oldestTs = v.lastAccessedAt
+        oldestKey = k
+      }
+    }
+    if (oldestKey) this.byId.delete(oldestKey)
   }
 
   private idOf(session: object): string {
@@ -320,7 +373,7 @@ export class SessionFold {
       if (diff >= 2) {
         const removedSources = state.prevSources.slice(nextLen, prevLen)
         removedSources.forEach((s) => changedSet.add(s))
-        
+
         this.recordCacheRisk({
           sessionId: state.sessionId,
           kind: 'shrink',
@@ -359,15 +412,16 @@ export class SessionFold {
       detail: 'surface 中间被替换，从其位置起的缓存前缀失效',
       changedSources: Array.from(changedSet),
     })
-    
+
     state.prevSources = currentSources
   }
 
   private recordCacheRisk(r: CacheRisk): void {
     this.cacheRisks.push(r)
-    if (this.cacheRisks.length > 100) {
-      this.cacheRisks.splice(0, this.cacheRisks.length - 100)
+    if (this.cacheRisks.length > MAX_RISKS) {
+      this.cacheRisks.splice(0, this.cacheRisks.length - MAX_RISKS)
     }
+    this.emitUpdate(r.sessionId)
   }
 
   private applySurfaceOp(state: InternalState, event: Record<string, unknown>): void {
@@ -436,11 +490,6 @@ export class SessionFold {
       },
     )
 
-    const hitTokens = normalized.prompt_cache_hit_tokens ?? 0
-    const missTokens = normalized.prompt_cache_miss_tokens ?? 0
-    const outputTokens = normalized.completion_tokens ?? 0
-    attribution.cost = calculateCost(model, hitTokens, missTokens, outputTokens)
-
     state.turns.push(attribution)
     if (state.turns.length > this.maxTurns) {
       state.turns.splice(0, state.turns.length - this.maxTurns)
@@ -452,6 +501,17 @@ export class SessionFold {
 
     const total = normalized.prompt_tokens + normalized.completion_tokens
     this.budget.record(state.sessionId, total)
+
+    this.emitUpdate(state.sessionId)
+  }
+
+  private emitUpdate(sessionId: string): void {
+    try {
+      const loose = this.ctx as unknown as { emit?: (name: string, ...args: unknown[]) => void }
+      loose.emit?.('tokenOptima/updated', sessionId)
+    } catch {
+      // 事件发射失败不影响核心逻辑
+    }
   }
 
   private modelOf(state: InternalState): string {
@@ -492,7 +552,14 @@ export class SessionFold {
     if (!latest) return []
     return CATEGORIES.map((c) => {
       const m = latest.categories[c.id]
-      return { id: c.id, key: c.key, label: c.label, group: c.group, value: m?.value ?? 0, precision: m?.precision ?? 'inferred' }
+      return {
+        id: c.id,
+        key: c.key,
+        label: c.label,
+        group: c.group,
+        value: m?.value ?? 0,
+        precision: m?.precision ?? 'inferred',
+      }
     })
   }
 
@@ -505,7 +572,6 @@ export class SessionFold {
     }))
   }
 
-  // 新增：返回包含所有统计信息的会话列表
   listSessions(): SessionSummary[] {
     const out: SessionSummary[] = []
     for (const [id, state] of this.byId) {
@@ -527,7 +593,6 @@ export class SessionFold {
         totalSaved,
       })
     }
-    // 按最后活动时间倒序
     out.sort((a, b) => b.lastTs - a.lastTs)
     return out
   }
@@ -545,8 +610,20 @@ export class SessionFold {
     const state = this.byId.get(sessionId)
     if (!state) return { sessionId, messageId, content: null, note: 'session not tracked' }
     const node = state.surface.find((n) => String(n.seq) === messageId)
-    if (!node) return { sessionId, messageId, content: null, note: 'message not found in current retained surface (may have been compacted)' }
-    return { sessionId, messageId, content: node.text, note: `source=${node.source} tokens=${node.tokens}` }
+    if (!node) {
+      return {
+        sessionId,
+        messageId,
+        content: null,
+        note: 'message not found in current retained surface (may have been compacted)',
+      }
+    }
+    return {
+      sessionId,
+      messageId,
+      content: node.text,
+      note: `source=${node.source} tokens=${node.tokens}`,
+    }
   }
 
   dispose(): void {

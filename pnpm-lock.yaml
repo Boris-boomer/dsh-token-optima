@@ -51,6 +51,10 @@ importers:
       zod:
         specifier: ^4.4.3
         version: 4.6.7
+    optionalDependencies:
+      '@huggingface/tokenizers':
+        specifier: ^0.1.3
+        version: 0.1.3
 
 packages:
 
@@ -375,6 +379,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@huggingface/tokenizers@0.1.3':
+    resolution: {integrity: sha512-8rF/RRT10u+kn7YuUbUg0OF30K8rjTc78aHpxT+qJ1uWSqxT1MHi8+9ltwYfkFYJzT/oS+qw3JVfHtNMGAdqyA==}
 
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
@@ -1284,6 +1291,9 @@ snapshots:
     optional: true
 
   '@esbuild/win32-x64@0.28.2':
+    optional: true
+
+  '@huggingface/tokenizers@0.1.3':
     optional: true
 
   '@jridgewell/sourcemap-codec@1.6.0': {}

@@ -22,9 +22,9 @@ DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框�
    底层是坐标模型 (source, cache_status, direction, is_reasoning)。
    数据来源分三档：实测（API 真值）、推断、估算。
 
-2. 真实费用核算与缓存 ROI
+2. 真实费用核算与缓存 ROI（支持峰谷计价）
    接入 DeepSeek 官方费率，实时计算每轮对话的**总花费**以及**缓存为你省下的金额**。
-   支持历史累计统计，直观感受缓存带来的成本收益。
+   自动识别高峰/空闲时段（北京时间工作日 9-12、14-18 为高峰），并支持历史累计统计。
 
 3. 64 token 块级缓存建模
    按官方 64 token 存储单元切分前缀，追踪命中与未命中。
@@ -37,8 +37,8 @@ DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框�
 5. 多会话与历史分析
    支持在面板内切换不同会话，查看全盘的历史轮次明细（每轮花费/省下金额/命中率）。
 
-6. CSV 导出
-   面板右上角按钮，导出当前会话的逐轮归因与费用数据。
+6. 现代化 UI 与图表
+   采用全新的深/浅色主题设计，内置带交互的环形构成图与趋势图，数据细节尽收眼底。
 
 安装
 ----
@@ -64,13 +64,44 @@ DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框�
 
 **完全退出 DSH**（托盘也要退）再启动。
 
+启用精确 Tokenizer（可选）
+------------------------
+
+插件默认使用字符加权算法（~80-90% 准确率）估算 Token 数量。如果想让 Token 归因达到 100% 精确（标记为 `exact`），可以手动加载 DeepSeek 的词表文件：
+
+**第一步：下载词表文件**
+
+从 HuggingFace 下载两个配置文件（总计约 7.8 MB），放入 `~/.dsh/` 目录：
+- https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer.json
+- https://huggingface.co/deepseek-ai/DeepSeek-V3/resolve/main/tokenizer_config.json
+
+**第二步：设置环境变量**
+
+需要让 DSH 进程能读取到这两个文件的绝对路径。请根据你的操作系统设置：
+
+*Windows (PowerShell)*：
+> 注意：如果你通过托盘或快捷方式启动 DSH，请使用下面的命令将变量写入“用户环境变量”，设置后需**完全重启 DSH**。
+
+    [Environment]::SetEnvironmentVariable('DSH_TOKENIZER_JSON', "$env:USERPROFILE\.dsh\tokenizer.json", 'User')
+    [Environment]::SetEnvironmentVariable('DSH_TOKENIZER_CONFIG', "$env:USERPROFILE\.dsh\tokenizer_config.json", 'User')
+
+*macOS / Linux*：
+将以下内容添加到 `~/.bashrc` 或 `~/.zshrc` 中：
+
+    export DSH_TOKENIZER_JSON="$HOME/.dsh/tokenizer.json"
+    export DSH_TOKENIZER_CONFIG="$HOME/.dsh/tokenizer_config.json"
+
+**第三步：验证**
+
+重启 DSH 并打开面板。如果面板底部的状态栏显示 `tokenizer: hf:... (exact)`，即代表加载成功。
+
 开发
 ----
 
     pnpm install
     pnpm typecheck   # 类型检查
-    pnpm build       # 生成 lib/index.mjs 和 lib/client.js
     pnpm test        # 运行 Vitest 测试
+    pnpm build       # 生成 lib/index.mjs、lib/client.js 和 d.ts 声明文件
 
 License
 -------

@@ -92,7 +92,6 @@ export interface ReasoningSnapshot {
   contentHash: string | null;
 }
 
-// 新增：费用核算结构
 export interface CostBreakdown {
   total: number;
   savedByCache: number;
@@ -101,6 +100,10 @@ export interface CostBreakdown {
     missCost: number;
     outputCost: number;
   };
+  /** 本次请求是否按高峰时段计费 */
+  isPeak: boolean;
+  /** 价格表版本标识，用于审计 */
+  pricingVersion: string;
 }
 
 export interface TurnAttribution {
@@ -115,7 +118,9 @@ export interface TurnAttribution {
   cacheEvents: CacheEvent[];
   reasoning: ReasoningSnapshot;
   usage: DeepSeekUsage;
-  cost?: CostBreakdown; // 新增
+  cost?: CostBreakdown;
+  /** OpenTelemetry GenAI 语义约定属性，零网络请求，仅用于本地导出/对接 */
+  otelAttributes?: Record<string, number | string>;
 }
 
 export interface ClassifiedRequest {

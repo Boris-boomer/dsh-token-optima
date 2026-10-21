@@ -1,4 +1,7 @@
 // DeepSeek 原生 tokenizer 适配 + 三层降级链
+//
+// 精度优先级：HuggingFace tokenizer.json（exact）→ 自建 BPE（exact，需词表）
+//            → 字符加权估算（estimated，~80-90%）
 
 import type { Precision } from './types.js';
 
@@ -15,7 +18,7 @@ export interface TokenizerAdapter {
   chunkBoundaries(text: string, blockSize: number): ChunkBoundary[];
 }
 
-/* ---------------- 字符加权估算（兜底） ---------------- */
+/* ---------------- 字符加权估算（最终兜底） ---------------- */
 
 const W_CJK = 0.6;
 const W_LATIN = 0.25;
@@ -63,10 +66,7 @@ export class EstimatedTokenizer implements TokenizerAdapter {
       }
     }
     if (start < text.length) {
-      // 尾块：acc 一定 < blockSize（否则循环里已经推过并重置了）。
-      // 这里必须用 floor 而不是 round，否则 acc ∈ [63.5, 64) 会被 round 到 64，
-      // 让尾块被误判为 complete，破坏「追加内容不破坏已有前缀块哈希」性质。
-      // 相关回归测试：tests/property.test.ts > 追加内容不破坏已有前缀块的哈希
+      // 尾块必须用 floor，防止 acc ∈ [63.5,64) 被 round 成 64 而误判 complete
       out.push({ start, end: text.length, tokens: Math.max(1, Math.floor(acc)) });
     }
     return out;
@@ -132,11 +132,8 @@ export class NativeTokenizer implements TokenizerAdapter {
 /* ---------------- 纯 TS BPE（词表外部提供） ---------------- */
 
 export interface BpeVocab {
-  /** token 字符串 → id */
   encoder: Map<string, number>;
-  /** id → token 字符串 */
   decoder: string[];
-  /** 合并优先级：pair key "a\u0000b" → rank，越小越优先 */
   ranks: Map<string, number>;
 }
 
@@ -144,11 +141,9 @@ export function createBpeEncoder(vocab: BpeVocab, id = 'bpe-ts'): RawEncoder {
   const { encoder, decoder, ranks } = vocab;
 
   const byteEncode = (text: string): string[] => {
-    // 简化的 byte-level 编码：UTF-8 字节映射到可见字符区
     const bytes = new TextEncoder().encode(text);
     const out: string[] = [];
     for (const b of bytes) {
-      // DeepSeek 使用 GPT-2 风格字节映射
       if (
         (b >= 0x21 && b <= 0x7e) ||
         (b >= 0xa1 && b <= 0xac) ||
@@ -207,11 +202,10 @@ export function createBpeEncoder(vocab: BpeVocab, id = 'bpe-ts'): RawEncoder {
       const id = encoder.get(t);
       if (id !== undefined) ids.push(id);
       else {
-        // 未知 token 逐字符兜底
         for (const ch of t) {
           const cid = encoder.get(ch);
           if (cid !== undefined) ids.push(cid);
-          else ids.push(decoder.length - 1); // unk
+          else ids.push(decoder.length - 1);
         }
       }
     }
@@ -221,8 +215,41 @@ export function createBpeEncoder(vocab: BpeVocab, id = 'bpe-ts'): RawEncoder {
   return { id, encode };
 }
 
-/* ---------------- 加载链：WASM → BPE → 估算 ---------------- */
+/* ---------------- HuggingFace tokenizer.json 加载（精确） ---------------- */
 
+/**
+ * @huggingface/tokenizers 0.1.3 的 API：
+ *   const tokenizer = new Tokenizer(tokenizerJson, tokenizerConfig)
+ *   const { ids, tokens, attention_mask } = tokenizer.encode(text)
+ *
+ * 注意：
+ *   - Tokenizer 是构造函数，不是带静态 fromFile 的类。
+ *   - 两个 JSON 必须先从磁盘读成对象，不能传路径。
+ *   - 该包的纯 JS 实现不暴露 byte offsets，因此 encodeWithOffsets 不可用。
+ *     NativeTokenizer 会退回到按比例估算边界，但 token 总数是 API 真值。
+ *
+ * 之所以不直接 import 该包的类型，是因为它是 optionalDependency：
+ * 未安装时 tsc 会对字面量 import 报 TS2307。这里用变量名动态导入绕过静态解析。
+ */
+interface HfEncoded {
+  ids?: number[];
+  tokens?: string[];
+  attention_mask?: number[];
+}
+
+interface HfTokenizerInstance {
+  encode(text: string): HfEncoded;
+}
+
+interface HfTokenizerCtor {
+  new (tokenizerJson: unknown, tokenizerConfig?: unknown): HfTokenizerInstance;
+}
+
+interface HfModuleLike {
+  Tokenizer: HfTokenizerCtor;
+}
+
+export type HfLoader = () => Promise<RawEncoder | null>;
 export type WasmLoader = () => Promise<RawEncoder | null>;
 export type BpeLoader = () => Promise<RawEncoder | null>;
 
@@ -231,8 +258,58 @@ export interface TokenizerResolution {
   warning: string | null;
 }
 
+/**
+ * 使用 @huggingface/tokenizers 加载 tokenizer.json（+ 可选 tokenizer_config.json）。
+ *
+ * - 该包是 optionalDependency，未安装时本函数会抛错，由 resolveTokenizer 降级。
+ * - 只接受本地文件路径；如果是 URL，调用方应先 fetch 到临时文件再传入。
+ * - 首次加载后由调用方缓存 TokenizerAdapter 实例，不要每轮重复加载。
+ */
+export async function loadHfTokenizer(
+  tokenizerJsonPath: string,
+  tokenizerConfigPath?: string,
+): Promise<RawEncoder> {
+  const { readFile } = await import('node:fs/promises')
+
+  // 关键：用变量名导入，避免 tsc 在 optionalDependency 未安装时做静态解析。
+  const pkgName = '@huggingface/tokenizers'
+  const mod = (await import(/* @vite-ignore */ pkgName)) as HfModuleLike
+
+  if (typeof mod?.Tokenizer !== 'function') {
+    throw new Error('@huggingface/tokenizers: Tokenizer 构造函数不可用')
+  }
+
+  const tokenizerJson = JSON.parse(await readFile(tokenizerJsonPath, 'utf8'))
+
+  // tokenizer_config.json 是可选的，但强烈建议提供：
+  // DeepSeek 的 tokenizer.json 里某些 post_processor 依赖它补 BOS/EOS 等特殊 token
+  let tokenizerConfig: unknown = undefined
+  if (tokenizerConfigPath) {
+    try {
+      tokenizerConfig = JSON.parse(await readFile(tokenizerConfigPath, 'utf8'))
+    } catch {
+      // 配置文件缺失不致命，继续用默认配置
+    }
+  }
+
+  const tokenizer = new mod.Tokenizer(tokenizerJson, tokenizerConfig)
+
+  return {
+    id: `hf:${tokenizerJsonPath}`,
+    encode(text: string): number[] {
+      const encoded = tokenizer.encode(text)
+      if (Array.isArray(encoded.ids)) return encoded.ids
+      // 兜底：某些小版本可能返回 Uint32Array
+      return encoded.ids ? Array.from(encoded.ids) : []
+    },
+    // 0.1.3 不提供 offsets，故意不实现 encodeWithOffsets。
+    // NativeTokenizer 会走比例估算边界分支，token 总数仍是真值。
+  }
+}
+
 export async function resolveTokenizer(
   options: {
+    hfLoader?: HfLoader;
     wasmLoader?: WasmLoader;
     bpeLoader?: BpeLoader;
     timeoutMs?: number;
@@ -248,6 +325,47 @@ export async function resolveTokenizer(
       ),
     ]);
 
+  // 1) HuggingFace tokenizer.json —— 最精确
+  if (options.hfLoader) {
+    try {
+      const enc = await withTimeout(options.hfLoader());
+      if (enc) return { tokenizer: new NativeTokenizer(enc), warning: null };
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (options.wasmLoader) {
+        try {
+          const enc = await withTimeout(options.wasmLoader());
+          if (enc) {
+            return {
+              tokenizer: new NativeTokenizer(enc),
+              warning: `HF tokenizer failed (${msg}); using WASM fallback.`,
+            };
+          }
+        } catch {
+          /* 继续降级 */
+        }
+      }
+      if (options.bpeLoader) {
+        try {
+          const enc = await withTimeout(options.bpeLoader());
+          if (enc) {
+            return {
+              tokenizer: new NativeTokenizer(enc),
+              warning: `HF tokenizer failed (${msg}); using BPE fallback.`,
+            };
+          }
+        } catch {
+          /* 继续降级 */
+        }
+      }
+      return {
+        tokenizer: new EstimatedTokenizer(),
+        warning: `HF tokenizer failed (${msg}); using character estimation (~80-90%).`,
+      };
+    }
+  }
+
+  // 2) WASM
   if (options.wasmLoader) {
     try {
       const enc = await withTimeout(options.wasmLoader());
@@ -279,6 +397,7 @@ export async function resolveTokenizer(
     }
   }
 
+  // 3) BPE
   if (options.bpeLoader) {
     try {
       const enc = await withTimeout(options.bpeLoader());
@@ -293,6 +412,7 @@ export async function resolveTokenizer(
 
   return {
     tokenizer: new EstimatedTokenizer(),
-    warning: 'Using character estimation (~80-90% accuracy).',
+    warning:
+      'Using character estimation (~80-90% accuracy). Provide hfLoader for exact counts.',
   };
 }

@@ -1,74 +1,75 @@
-import { writeFileSync, mkdirSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { join, dirname } from 'node:path'
+import { writeFile, mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
 
 export interface HealthFailure {
-  item: string
-  detail: string
+  item: string;
+  detail: string;
 }
 
 export interface HealthReport {
-  at: number
-  ok: boolean
-  failures: HealthFailure[]
+  at: number;
+  ok: boolean;
+  failures: HealthFailure[];
 }
 
-// 修改路径：存入 .dsh/token-optima/ 子目录，而不是直接扔在根目录
-const HEALTH_FILE = join(homedir(), '.dsh', 'token-optima', 'health.json')
+const HEALTH_FILE = join(homedir(), '.dsh', 'token-optima', 'health.json');
 
 export class HealthProbe {
-  private readonly failures = new Map<string, string>()
+  private readonly failures = new Map<string, string>();
+  private flushPending = false;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   fail(item: string, detail: string): void {
-    if (this.failures.get(item) === detail) return
-    this.failures.set(item, detail)
-    console.error(`[dsh-token-optima] interface drift: ${item} (${detail})`)
-    this.flush()
+    if (this.failures.get(item) === detail) return;
+    this.failures.set(item, detail);
+    console.error(`[dsh-token-optima] interface drift: ${item} (${detail})`);
+    this.scheduleFlush();
   }
 
   pass(item: string): void {
-    if (!this.failures.has(item)) return
-    this.failures.delete(item)
-    this.flush()
+    if (!this.failures.has(item)) return;
+    this.failures.delete(item);
+    this.scheduleFlush();
   }
 
   checkSession(session: unknown): void {
-    if (!session || typeof session !== 'object') return
-    const s = session as Record<string, unknown>
+    if (!session || typeof session !== 'object') return;
+    const s = session as Record<string, unknown>;
 
     if (typeof s['eventAt'] !== 'function') {
-      this.fail('session.eventAt', '不是函数，历史重放不可用')
+      this.fail('session.eventAt', '不是函数，历史重放不可用');
     } else {
-      this.pass('session.eventAt')
+      this.pass('session.eventAt');
     }
 
-    const surface = s['surface'] as Record<string, unknown> | undefined
+    const surface = s['surface'] as Record<string, unknown> | undefined;
     if (!surface || !Array.isArray(surface['nodes'])) {
-      this.fail('session.surface.nodes', '不是数组，surface 追踪不可用')
+      this.fail('session.surface.nodes', '不是数组，surface 追踪不可用');
     } else {
-      this.pass('session.surface.nodes')
+      this.pass('session.surface.nodes');
     }
   }
 
   checkSessionsService(svc: unknown): void {
     if (!svc || typeof svc !== 'object') {
-      this.fail('sessions 服务', '不存在')
-      return
+      this.fail('sessions 服务', '不存在');
+      return;
     }
-    const methods = ['list', 'all', 'entries', 'values']
+    const methods = ['list', 'all', 'entries', 'values'];
     const has = methods.some(
       (m) => typeof (svc as Record<string, unknown>)[m] === 'function',
-    )
+    );
     if (!has) {
-      this.fail('sessions 服务', '无可调方法（list/all/entries/values）')
+      this.fail('sessions 服务', '无可调方法（list/all/entries/values）');
     } else {
-      this.pass('sessions 服务')
+      this.pass('sessions 服务');
     }
   }
 
   checkEffortPolicy(ok: boolean, detail?: string): void {
-    if (ok) this.pass('agent/request')
-    else this.fail('agent/request', detail ?? '挂载失败')
+    if (ok) this.pass('agent/request');
+    else this.fail('agent/request', detail ?? '挂载失败');
   }
 
   snapshot(): HealthReport {
@@ -76,15 +77,42 @@ export class HealthProbe {
       at: Date.now(),
       ok: this.failures.size === 0,
       failures: [...this.failures.entries()].map(([item, detail]) => ({ item, detail })),
-    }
+    };
   }
 
-  private flush(): void {
+  /**
+   * 异步 + 防抖写入：失败不阻塞主流程，同步 fail()/pass() 也不会卡事件循环。
+   */
+  private scheduleFlush(): void {
+    if (this.flushPending) return;
+    this.flushPending = true;
+    this.flushTimer = setTimeout(() => {
+      this.flushPending = false;
+      this.flushTimer = null;
+      void this.flush();
+    }, 200);
+    // 让 timer 不阻止进程退出
+    this.flushTimer.unref?.();
+  }
+
+  private async flush(): Promise<void> {
     try {
-      mkdirSync(dirname(HEALTH_FILE), { recursive: true })
-      writeFileSync(HEALTH_FILE, JSON.stringify(this.snapshot(), null, 2), 'utf8')
+      await mkdir(dirname(HEALTH_FILE), { recursive: true });
+      await writeFile(
+        HEALTH_FILE,
+        JSON.stringify(this.snapshot(), null, 2),
+        'utf8',
+      );
     } catch {
       // 诊断文件，写失败不抛
     }
+  }
+
+  dispose(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    this.flushPending = false;
   }
 }

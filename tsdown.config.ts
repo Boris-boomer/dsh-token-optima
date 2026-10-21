@@ -27,12 +27,17 @@ const host: UserConfig = {
       specifier.startsWith('node:') ||
       specifier === '@deepseek-ai/cordis' ||
       specifier === '@deepseek-ai/schemastery' ||
-      specifier === '@deepseek-ai/dsh-typert-protocol',
+      specifier === '@deepseek-ai/dsh-typert-protocol' ||
+      // 精确 tokenizer 是 optionalDependency，体积约 8 MB（含 WASM 词表），
+      // 绝不能打包进 lib/index.mjs，否则插件主包直接爆炸。
+      // 运行期由宿主环境按需 resolve；未安装时 loadHfTokenizer 动态导入失败并降级。
+      specifier === '@huggingface/tokenizers',
     alwaysBundle: (specifier: string) =>
       !specifier.startsWith('node:') &&
       specifier !== '@deepseek-ai/cordis' &&
       specifier !== '@deepseek-ai/schemastery' &&
-      specifier !== '@deepseek-ai/dsh-typert-protocol',
+      specifier !== '@deepseek-ai/dsh-typert-protocol' &&
+      specifier !== '@huggingface/tokenizers',
   },
   outputOptions: { comments: false },
 }

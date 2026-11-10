@@ -43,7 +43,28 @@ DeepSeek Harness 的深度 Token 监测插件。挂在 DSH 的 Cordis 插件框�
 安装
 ----
 
-在 DSH profile 的 package.json 里加：
+### 方式一：GitHub Release tarball（推荐）
+
+在 DSH profile 目录下执行：
+
+    pnpm add https://github.com/Boris-boomer/dsh-token-optima/releases/download/v0.5.0/dsh-token-optima-0.5.0.tgz
+
+然后在 profile 的 `package.json` 的 `dsh.profile.bundles` 里加入 `"dsh-token-optima"`：
+
+    "dsh": {
+      "profile": {
+        "bundles": [
+          ...,
+          "dsh-token-optima"
+        ]
+      }
+    }
+
+**完全退出 DSH**（托盘也要退）再启动。
+
+### 方式二：本地路径（开发调试用）
+
+在 DSH profile 的 `package.json` 里加：
 
     "dependencies": {
       "dsh-token-optima": "link:<插件绝对路径>"

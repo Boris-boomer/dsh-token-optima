@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.0] - 2026-10-21
 
+### Distribution
+- GitHub Release: https://github.com/Boris-boomer/dsh-token-optima/releases/tag/v0.5.0
+- Tarball: https://github.com/Boris-boomer/dsh-token-optima/releases/download/v0.5.0/dsh-token-optima-0.5.0.tgz
+
 ### Added
 - **精确 Tokenizer 支持**：新增通过 `@huggingface/tokenizers` 加载本地 `tokenizer.json`，将 1–9 类输入 Token 归因从 `estimated`（字符估算）升级为 `exact`（API 真值）。未配置时自动降级到字符估算，不阻塞插件。
 - **峰谷计价模型**：接入 DeepSeek 最新计费口径，按北京时间工作日 9:00–12:00、14:00–18:00 判定为高峰，其余为空闲（50% 折扣）。面板同步展示当前计费时段。

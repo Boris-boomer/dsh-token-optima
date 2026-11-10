@@ -1,0 +1,12 @@
+import type { Context } from '@deepseek-ai/cordis';
+import { type Config as ConfigType } from './config.js';
+export declare const name = "dsh-token-optima";
+export declare const inject: string[];
+export { Config, NS } from './config.js';
+export type { Config as TokenOptimaConfig } from './config.js';
+export * from './core/index.js';
+export { SessionFold } from './host/session-fold.js';
+export type { CacheRisk } from './host/session-fold.js';
+export { HealthProbe } from './host/health-probe.js';
+export type { HealthReport, HealthFailure } from './host/health-probe.js';
+export declare function apply(ctx: Context, config: ConfigType): void;

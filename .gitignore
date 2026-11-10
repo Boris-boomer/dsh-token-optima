@@ -3,9 +3,8 @@ node_modules/
 .pnpm-store/
 
 # build outputs
-lib/
-dist/
 .build/
+dist/
 *.tsbuildinfo
 
 # logs

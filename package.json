@@ -42,6 +42,7 @@
   "files": [
     "lib/index.mjs",
     "lib/client.js",
+    "lib/package.json",
     "cordis.patch.yml",
     "lib/types/**/*.d.ts",
     "!**/*.tsbuildinfo",
@@ -53,6 +54,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "demo": "tsx examples/demo.ts",
+    "prepare": "pnpm build",
     "prepublishOnly": "pnpm build && pnpm test"
   },
   "dsh": {
